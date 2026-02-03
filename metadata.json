@@ -1,0 +1,7 @@
+{
+  "name": "Lion process",
+  "description": "A comprehensive Manufacturing Execution System (MES) for product traceability, order management, and operator control with barcode integration.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
