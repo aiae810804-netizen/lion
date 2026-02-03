@@ -12,7 +12,6 @@ Al abrir el proyecto en VSCode por primera vez, verás una notificación para in
 - Prettier - Code formatter
 - ES7+ React/Redux/React-Native snippets
 - Tailwind CSS IntelliSense
-- TypeScript Vue Plugin (Volar)
 - Path Intellisense
 - IntelliCode
 

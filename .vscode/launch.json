@@ -7,12 +7,7 @@
       "name": "Debug: Chrome",
       "url": "http://localhost:5173",
       "webRoot": "${workspaceFolder}",
-      "sourceMaps": true,
-      "sourceMapPathOverrides": {
-        "webpack:///./~/*": "${webRoot}/node_modules/*",
-        "webpack:///./*": "${webRoot}/*",
-        "webpack:///*": "*"
-      }
+      "sourceMaps": true
     },
     {
       "type": "node",
