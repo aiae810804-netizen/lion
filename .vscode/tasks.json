@@ -1,0 +1,45 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Dev: Ejecutar servidor de desarrollo",
+      "type": "npm",
+      "script": "dev",
+      "problemMatcher": [],
+      "detail": "Inicia el servidor de desarrollo de Vite con hot reload",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "new"
+      }
+    },
+    {
+      "label": "Build: Compilar aplicación",
+      "type": "npm",
+      "script": "build",
+      "problemMatcher": ["$tsc"],
+      "detail": "Compila TypeScript y construye la aplicación para producción"
+    },
+    {
+      "label": "Server: Ejecutar servidor backend",
+      "type": "npm",
+      "script": "server",
+      "problemMatcher": [],
+      "detail": "Inicia el servidor Express backend",
+      "presentation": {
+        "reveal": "always",
+        "panel": "new"
+      }
+    },
+    {
+      "label": "Preview: Vista previa de producción",
+      "type": "npm",
+      "script": "preview",
+      "problemMatcher": [],
+      "detail": "Ejecuta vista previa de la build de producción"
+    }
+  ]
+}
