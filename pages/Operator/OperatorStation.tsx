@@ -1426,6 +1426,9 @@ function StationInterface({ operation, route, onBack, user }: StationProps) {
       )}
       {showAccessoryReprintModal && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 backdrop-blur-sm">
+          <div className="bg-white p-6 rounded-2xl shadow-xl w-full max-w-md animate-in zoom-in-95">
+            <h3 className="text-lg font-bold mb-4 flex items-center"><Printer className="mr-2 text-blue-600"/> Reimprimir Accesorios</h3>
+            <input
               type="number"
               min={1}
               max={999}
