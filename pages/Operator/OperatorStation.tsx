@@ -814,6 +814,25 @@ function StationInterface({ operation, route, onBack, user }: StationProps) {
     setSelectAll(false);
   };
 
+  // --- HANDLER: Finalizar y Cerrar Orden (DB + UI) ---
+  const finishAndCloseOrder = async () => {
+      if (!activeOrders) return;
+      showLoading("Finalizando orden...");
+      try {
+          await Promise.all(activeOrders.map(async (order) => {
+              const updatedOrder = { ...order, status: 'CLOSED' as 'CLOSED' };
+              // @ts-ignore
+              await db.updateOrder(updatedOrder);
+          }));
+          showAlert("Éxito", "Orden finalizada y cerrada.", "success");
+          closeOrderAndReset();
+      } catch (e: any) {
+          showAlert("Error", "No se pudo finalizar la orden: " + e.message, "error");
+      } finally {
+          hideLoading();
+      }
+  };
+
   const handleChangeContext = () => {
       setActiveOrders(null);
       setActiveParts([]);
@@ -1035,21 +1054,20 @@ function StationInterface({ operation, route, onBack, user }: StationProps) {
     const serialsForOrder = allOrderSerials.filter(s => s.orderNumber === order.orderNumber);
     const completedInThisStation = serialsForOrder.filter(s => {
       if (!s.history || s.history.length === 0) return false;
-      const lastOp = s.history[s.history.length - 1];
-      return lastOp && lastOp.operationId === operation.id;
+      return s.history.some(h => h.operationId === operation.id);
     }).length;
     return { completedInThisStation, total: order.quantity };
   };
 
   // --- Auto-close order on completion SOLO EN ESTACIÓN FINAL ---
   const showCompletionUI = activeOrders ? activeOrders.every(order => {
-    if (!operation.isFinal) return false;
     const { completedInThisStation, total } = getStationProgress(order);
     return completedInThisStation >= total;
   }) : false;
 
   useEffect(() => {
-    if (showCompletionUI && activeOrders && activeOrders.some(o => o.status !== 'CLOSED') && operation.isFinal) {
+    const isPcb = activeParts.some(p => p.serialGenType === 'PCB_SERIAL');
+    if (showCompletionUI && activeOrders && activeOrders.some(o => o.status !== 'CLOSED') && operation.isFinal && !isPcb) {
       const closeOrders = async () => {
         try {
           showAlert("Orden(es) Completa(s)", "Las órdenes se cerrarán automáticamente.", "info");
@@ -1182,37 +1200,46 @@ function StationInterface({ operation, route, onBack, user }: StationProps) {
                             
                              <div className="grid grid-cols-1 gap-3 mt-4">
                                 {operation.isFinal ? (<>
-                                    {/* Buttons only show if all parts are of the same type to avoid ambiguity */}
-                                    {activeParts.every(p => p.serialGenType === 'PCB_SERIAL') && (
-                                        <>
-                                            <button onClick={() => { if (activeParts.length === 1) handlePrintBoxLabel(); }} disabled={isPrintingBoxLabel || activeParts.length > 1} className="px-4 py-3 bg-white border border-slate-300 rounded-lg text-slate-700 font-bold hover:bg-slate-50 flex items-center justify-center shadow-sm disabled:opacity-50"><Box size={16} className="mr-2"/> Imprimir Etiqueta de Caja</button>
-                                            <button onClick={closeOrderAndReset} className="px-4 py-3 bg-blue-600 text-white rounded-lg font-bold hover:bg-blue-700 shadow-lg flex items-center justify-center"><LogOut size={16} className="mr-2"/> Finalizar (Cerrar Orden)</button>
-                                        </>
-                                    )}
                                     {activeParts.every(p => p.serialGenType === 'LOT_BASED') && (
-                                        <>
-                                            <button onClick={async () => { await fetchLabelConfigs(); setShowLotReprintModal(true); }} className="px-4 py-3 bg-white border border-slate-300 rounded-lg text-slate-700 font-bold hover:bg-slate-50 flex items-center justify-center shadow-sm"><Printer size={16} className="mr-2"/> Reimprimir Etiqueta</button>
-                                            <button onClick={() => { if (activeParts.length === 1) handlePrintBoxLabel(); }} disabled={isPrintingBoxLabel || activeParts.length > 1} className="px-4 py-3 bg-white border border-slate-300 rounded-lg text-slate-700 font-bold hover:bg-slate-50 flex items-center justify-center shadow-sm disabled:opacity-50"><Box size={16} className="mr-2"/> Imprimir Etiqueta de Caja</button>
-                                            <button onClick={closeOrderAndReset} className="px-4 py-3 bg-blue-600 text-white rounded-lg font-bold hover:bg-blue-700 shadow-lg flex items-center justify-center"><LogOut size={16} className="mr-2"/> Finalizar (Cerrar Orden)</button>
-                                        </>
+                                        <button onClick={async () => { await fetchLabelConfigs(); setShowLotReprintModal(true); }} className="px-4 py-3 bg-white border border-slate-300 rounded-lg text-slate-700 font-bold hover:bg-slate-50 flex items-center justify-center shadow-sm"><Printer size={16} className="mr-2"/> Reimprimir Etiqueta</button>
                                     )}
                                     {activeParts.every(p => p.serialGenType === 'ACCESSORIES') && (
-                                        <>
-                                            <button onClick={async () => { await fetchLabelConfigs(); setShowAccessoryReprintModal(true); }} className="px-4 py-3 bg-white border border-slate-300 rounded-lg text-slate-700 font-bold hover:bg-slate-50 flex items-center justify-center shadow-sm"><Printer size={16} className="mr-2"/> Reimprimir</button>
-                                            <button onClick={() => { if (activeParts.length === 1) handlePrintBoxLabel(); }} disabled={isPrintingBoxLabel || activeParts.length > 1} className="px-4 py-3 bg-white border border-slate-300 rounded-lg text-slate-700 font-bold hover:bg-slate-50 flex items-center justify-center shadow-sm disabled:opacity-50"><Box size={16} className="mr-2"/> Imprimir Etiqueta de Caja</button>
-                                            <button onClick={closeOrderAndReset} className="px-4 py-3 bg-blue-600 text-white rounded-lg font-bold hover:bg-blue-700 shadow-lg flex items-center justify-center"><LogOut size={16} className="mr-2"/> Finalizar (Cerrar Orden)</button>
-                                        </>
+                                        <button onClick={async () => { await fetchLabelConfigs(); setShowAccessoryReprintModal(true); }} className="px-4 py-3 bg-white border border-slate-300 rounded-lg text-slate-700 font-bold hover:bg-slate-50 flex items-center justify-center shadow-sm"><Printer size={16} className="mr-2"/> Reimprimir</button>
+                                    )}
+                                    
+                                    {!activeParts.every(p => p.serialGenType === 'LOT_BASED' || p.serialGenType === 'ACCESSORIES') && (
+                                         <p className="text-sm text-slate-500 mb-2 text-center">Haga clic en un número de serie en la lista para reimprimir etiquetas.</p>
+                                    )}
+                                    
+                                    <button onClick={() => { if (activeParts.length === 1) handlePrintBoxLabel(); }} disabled={isPrintingBoxLabel || activeParts.length > 1} className="px-4 py-3 bg-white border border-slate-300 rounded-lg text-slate-700 font-bold hover:bg-slate-50 flex items-center justify-center shadow-sm disabled:opacity-50"><Box size={16} className="mr-2"/> Imprimir Etiqueta de Caja</button>
+                                    
+                                    {!activeParts.every(p => p.serialGenType === 'LOT_BASED' || p.serialGenType === 'ACCESSORIES') ? (
+                                        <button onClick={finishAndCloseOrder} className="px-4 py-3 bg-blue-600 text-white rounded-lg font-bold hover:bg-blue-700 shadow-lg flex items-center justify-center"><CheckCircle size={16} className="mr-2"/> Finalizar (Cerrar Orden)</button>
+                                    ) : (
+                                        <button onClick={closeOrderAndReset} className="px-4 py-3 bg-blue-600 text-white rounded-lg font-bold hover:bg-blue-700 shadow-lg flex items-center justify-center"><LogOut size={16} className="mr-2"/> Finalizar (Cerrar Orden)</button>
                                     )}
                                 </>) : (<>
                                     {/* --- BOTONES PARA ESTACIÓN INICIAL --- */}
-                                    {activeParts.every(p => p.serialGenType !== 'LOT_BASED') && (
-                                        <button onClick={() => setIsReprinting(true)} className="px-4 py-2 bg-white border border-slate-300 rounded-lg text-slate-700 font-bold hover:bg-slate-50 flex items-center justify-center">
-                                            <Printer size={16} className="mr-2"/> Re-Imprimir
-                                        </button>
+                                    {!activeParts.every(p => p.serialGenType === 'LOT_BASED' || p.serialGenType === 'ACCESSORIES') ? (
+                                        <div className="w-full">
+                                            <p className="text-slate-600 font-medium mb-2 text-center">Orden completada en esta estación.</p>
+                                            <p className="text-sm text-slate-500 mb-4 text-center">Haga clic en un número de serie en la lista para reimprimir etiquetas.</p>
+                                            <button onClick={closeOrderAndReset} className="w-full px-4 py-3 bg-blue-600 text-white rounded-lg font-bold hover:bg-blue-700 shadow flex items-center justify-center">
+                                                <LogOut size={16} className="mr-2"/> Cerrar Orden
+                                            </button>
+                                        </div>
+                                    ) : (
+                                        <>
+                                            {activeParts.every(p => p.serialGenType !== 'LOT_BASED') && (
+                                                <button onClick={() => setIsReprinting(true)} className="px-4 py-2 bg-white border border-slate-300 rounded-lg text-slate-700 font-bold hover:bg-slate-50 flex items-center justify-center">
+                                                    <Printer size={16} className="mr-2"/> Re-Imprimir
+                                                </button>
+                                            )}
+                                            <button onClick={closeOrderAndReset} className={`px-4 py-2 bg-blue-600 text-white rounded-lg font-bold hover:bg-blue-700 shadow flex items-center justify-center`}>
+                                                <LogOut size={16} className="mr-2"/> Cerrar Orden
+                                            </button>
+                                        </>
                                     )}
-                                    <button onClick={closeOrderAndReset} className={`px-4 py-2 bg-blue-600 text-white rounded-lg font-bold hover:bg-blue-700 shadow flex items-center justify-center`}>
-                                        <LogOut size={16} className="mr-2"/> Cerrar Orden
-                                    </button>
                                 </>)}
                             </div>
                         </div>
@@ -1441,6 +1468,48 @@ function StationInterface({ operation, route, onBack, user }: StationProps) {
             <div className="flex gap-2 justify-end">
               <button className="px-4 py-2 rounded-lg bg-slate-200 text-slate-700 font-bold hover:bg-slate-300" onClick={() => { setShowAccessoryReprintModal(false); setAccessoryReprintQty(1); }}>Cancelar</button>
               <button className="px-4 py-2 rounded-lg bg-blue-600 text-white font-bold hover:bg-blue-700" onClick={async () => { await handleAccessoryReprint(); setShowAccessoryReprintModal(false); setAccessoryReprintQty(1); }} disabled={accessoryReprintQty < 1}>Reimprimir</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* --- MODAL DETALLE DE SERIAL --- */}
+      {selectedSerialDetail && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 backdrop-blur-sm">
+          <div className="bg-white p-6 rounded-2xl shadow-xl w-full max-w-lg animate-in zoom-in-95">
+            <h3 className="text-lg font-bold mb-4 flex items-center"><Info className="mr-2 text-blue-600"/> Detalle de Serial</h3>
+            <div className="mb-2"><span className="font-bold text-slate-700">Serial:</span> <span className="font-mono text-blue-700">{selectedSerialDetail.serialNumber}</span></div>
+            <div className="mb-2"><span className="font-bold text-slate-700">Modelo:</span> <span className="font-mono text-purple-700">{(() => {
+              const part = activeParts.find(p => p.id === selectedSerialDetail.partNumberId);
+              return part ? part.productCode : '-';
+            })()}</span></div>
+            <div className="mb-2"><span className="font-bold text-slate-700">Prueba Funcional:</span> <span>{selectedSerialDetail.testFechaRegistro ? new Date(selectedSerialDetail.testFechaRegistro).toLocaleString() : '-'}</span></div>
+            <div className="mb-2"><span className="font-bold text-slate-700">Firmware:</span> <span>{selectedSerialDetail.testSensorFW || '-'}</span></div>
+            <div className="mb-2"><span className="font-bold text-slate-700">Estado:</span> <span>{selectedSerialDetail.isComplete ? <span className="text-green-600 font-bold">✔ Completado</span> : <span className="text-slate-400">Pendiente</span>}</span></div>
+            <div className="mb-4">
+              <span className="font-bold text-slate-700">Historial de Operaciones:</span>
+              <ul className="list-disc ml-6 mt-1 text-sm">
+                {selectedSerialDetail.history && selectedSerialDetail.history.length > 0 ? (
+                  selectedSerialDetail.history.map((h, idx) => (
+                    <li key={idx}>
+                      {h.operationName} por {h.operatorName} <span className="text-slate-400">({new Date(h.timestamp).toLocaleString()})</span>
+                    </li>
+                  ))
+                ) : <li className="text-slate-400">Sin historial</li>}
+              </ul>
+            </div>
+            <div className="mb-4">
+              <span className="font-bold text-slate-700">Etiquetas impresas:</span>
+              <ul className="list-disc ml-6 mt-1 text-sm">
+                {selectedSerialDetail.printHistory && selectedSerialDetail.printHistory.length > 0 ? (
+                  selectedSerialDetail.printHistory.map((ph, idx) => (
+                    <li key={idx}>{ph.fileName || 'Etiqueta'} <span className="text-slate-400">({ph.timestamp ? new Date(ph.timestamp).toLocaleString() : '-'})</span></li>
+                  ))
+                ) : <li className="text-slate-400">Sin etiquetas</li>}
+              </ul>
+            </div>
+            <div className="flex gap-2 justify-end">
+              <button className="px-4 py-2 rounded-lg bg-slate-200 text-slate-700 font-bold hover:bg-slate-300" onClick={() => setSelectedSerialDetail(null)}>Cerrar</button>
             </div>
           </div>
         </div>
