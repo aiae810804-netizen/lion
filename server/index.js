@@ -28,8 +28,15 @@ const SYSTEM_PRINT_CONFIG = {
     EXE_PATH: 'C:\\Tharo\\EASYLABEL\\Easy.exe'
 };
 
+const SYSTEM_TABLES = [
+    'Users', 'Operations', 'ProcessRoutes', 'ProcessRouteSteps', 
+    'PartNumbers', 'WorkOrders', 'Serials', 'SerialHistory', 
+    'PrintLogs', 'LabelConfigs', 'LabelFields', 'test_logs'
+];
+
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '200mb' }));
+app.use(express.urlencoded({ limit: '200mb', extended: true }));
 // Servir archivos estáticos del frontend
 app.use(express.static(DIST_DIR));
 
@@ -55,6 +62,7 @@ const dbMiddleware = async (req, res, next) => {
     }
 };
 
+
 // --- RUTAS DE SISTEMA ---
 
 app.get('/api/health', async (req, res) => {
@@ -75,11 +83,12 @@ app.post('/api/setup', async (req, res) => {
         const masterPool = new sql.ConnectionPool(masterConfig);
         await masterPool.connect();
         
-        const dbCheck = await masterPool.request().query("SELECT * FROM sys.databases WHERE name = 'TraceMasterDB'");
+        const dbName = sqlConfig.database;
+        const dbCheck = await masterPool.request().query(`SELECT * FROM sys.databases WHERE name = '${dbName}'`);
         
         if (dbCheck.recordset.length === 0) {
-            logs.push("Database 'TraceMasterDB' not found. Creating...");
-            await masterPool.request().query("CREATE DATABASE TraceMasterDB");
+            logs.push(`Database '${dbName}' not found. Creating...`);
+            await masterPool.request().query(`CREATE DATABASE ${dbName}`);
             logs.push("Database created successfully.");
         }
         
@@ -195,6 +204,125 @@ app.post('/api/setup', async (req, res) => {
 });
 
 app.use(dbMiddleware);
+
+
+// --- BACKUP & RESTORE ---
+app.get('/api/admin/export', dbMiddleware, async (req, res) => {
+    try {
+        const backup = {
+            version: '1.0.0',
+            timestamp: new Date().toISOString(),
+            data: {}
+        };
+        for (const table of SYSTEM_TABLES) {
+            // Detectar columna IDENTITY
+            const identityRes = await req.db.request().query(`SELECT name FROM sys.identity_columns WHERE object_id = OBJECT_ID('${table}')`);
+            const identityCol = identityRes.recordset.length > 0 ? identityRes.recordset[0].name : null;
+            const result = await req.db.request().query(`SELECT * FROM ${table}`);
+            let rows = result.recordset;
+            // Si la tabla tiene columna IDENTITY, excluye el campo Id (o el identityCol)
+            if (identityCol) {
+                rows = rows.map(row => {
+                    const copy = { ...row };
+                    delete copy[identityCol]; // Elimina el campo identity
+                    // También elimina 'Id' si el identityCol es diferente (por seguridad)
+                    if (identityCol !== 'Id') delete copy['Id'];
+                    return copy;
+                });
+            }
+            backup.data[table] = rows;
+        }
+        res.json(backup);
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/admin/import', dbMiddleware, async (req, res) => {
+    const { data } = req.body;
+    if (!data) return res.status(400).json({ error: 'No se recibieron datos para importar.' });
+    
+    const logs = [];
+    try {
+        const transaction = new sql.Transaction(req.db);
+        await transaction.begin();
+
+        for (const table of SYSTEM_TABLES) {
+            const tableData = data[table];
+            if (!tableData || !Array.isArray(tableData)) {
+                logs.push(`[INFO] Tabla ${table}: No se encontró información en el archivo de origen.`);
+                continue;
+            }
+
+            // Obtener columnas actuales de la BD para comparación dinámica
+            const schemaRes = await transaction.request()
+                .query(`SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '${table}'`);
+            const dbColumns = schemaRes.recordset.map(r => r.COLUMN_NAME);
+
+            // Verificar si la tabla tiene columna IDENTITY
+            const identityRes = await transaction.request()
+                .query(`SELECT name FROM sys.identity_columns WHERE object_id = OBJECT_ID('${table}')`);
+            const identityCol = identityRes.recordset.length > 0 ? identityRes.recordset[0].name : null;
+            
+            // Limpiar tabla actual antes de la importación maestra
+            await transaction.request().query(`DELETE FROM ${table}`);
+
+            let importedRows = 0;
+            let schemaMismatchLogged = false;
+            let identityInsertEnabled = false;
+
+            // Si hay columna identity y los datos la incluyen, activar IDENTITY_INSERT
+            if (identityCol && tableData.length > 0 && Object.prototype.hasOwnProperty.call(tableData[0], identityCol)) {
+                await transaction.request().query(`SET IDENTITY_INSERT ${table} ON`);
+                identityInsertEnabled = true;
+            }
+
+            for (const row of tableData) {
+                const rowKeys = Object.keys(row);
+                // Filtrar solo las columnas que sí existen en la base de datos destino
+                const validKeys = rowKeys.filter(k => dbColumns.includes(k));
+                
+                // Indicar si hay discrepancias de esquema (solo una vez por tabla)
+                if (!schemaMismatchLogged) {
+                    const extraInSource = rowKeys.filter(k => !dbColumns.includes(k));
+                    const missingInSource = dbColumns.filter(k => !rowKeys.includes(k));
+
+                    if (extraInSource.length > 0) {
+                        logs.push(`[WARN] Tabla ${table}: El origen tiene columnas extra (${extraInSource.join(', ')}) que serán ignoradas.`);
+                    }
+                    if (missingInSource.length > 0) {
+                        logs.push(`[INFO] Tabla ${table}: Faltan columnas en el origen (${missingInSource.join(', ')}). Se usarán valores por defecto/NULL.`);
+                    }
+                    schemaMismatchLogged = true;
+                }
+
+                if (validKeys.length > 0) {
+                    const columnsStr = validKeys.join(', ');
+                    const valuesStr = validKeys.map(k => {
+                        const val = row[k];
+                        if (val === null || val === undefined) return 'NULL';
+                        if (typeof val === 'string') return `'${val.replace(/'/g, "''")}'`;
+                        if (typeof val === 'boolean') return val ? 1 : 0;
+                        if (val instanceof Date) return `'${val.toISOString()}'`;
+                        return val;
+                    }).join(', ');
+
+                    await transaction.request().query(`INSERT INTO ${table} (${columnsStr}) VALUES (${valuesStr})`);
+                    importedRows++;
+                }
+            }
+
+            if (identityInsertEnabled) {
+                await transaction.request().query(`SET IDENTITY_INSERT ${table} OFF`);
+            }
+            logs.push(`[OK] Tabla ${table}: ${importedRows} registros importados exitosamente.`);
+        }
+        await transaction.commit();
+        res.json({ success: true, logs });
+    } catch (e) { 
+        console.error("[IMPORT ERROR]", e);
+        res.status(500).json({ error: "Fallo crítico durante la transacción: " + e.message }); 
+    }
+});
+
 
 app.post('/api/auth/login', async (req, res) => {
     const { username, password } = req.body;
@@ -929,16 +1057,24 @@ app.post('/api/serials/batch-generate', async (req, res) => {
 
 // Crear o actualizar un serial individual
 app.post('/api/serials', async (req, res) => {
-    const { serialNumber, orderNumber, partNumberId, currentOperationId, isComplete, trayId, testFechaRegistro, testSensorFW } = req.body;
+    const { serialNumber, orderNumber, partNumberId, currentOperationId, isComplete, trayId, testFechaRegistro, testSensorFW, operatorId } = req.body;
     if (!serialNumber || !orderNumber || !partNumberId) {
         return res.status(400).json({ error: 'Faltan datos obligatorios (serialNumber, orderNumber, partNumberId).' });
     }
+
+    const transaction = new sql.Transaction(req.db);
     try {
+        await transaction.begin();
+        const request = transaction.request();
+
         // Verificar si el serial ya existe
-        const check = await req.db.request().input('SN', sql.NVarChar, serialNumber).query('SELECT SerialNumber FROM Serials WHERE SerialNumber = @SN');
+        const check = await request.input('SN_check', sql.NVarChar, serialNumber).query('SELECT SerialNumber, CurrentOperationId FROM Serials WHERE SerialNumber = @SN_check');
+        const now = new Date();
+
         if (check.recordset.length > 0) {
             // Actualizar
-            await req.db.request()
+            const updateRequest = transaction.request(); // New request for the update
+            await updateRequest
                 .input('SN', sql.NVarChar, serialNumber)
                 .input('ON', sql.NVarChar, orderNumber)
                 .input('PN', sql.NVarChar, partNumberId)
@@ -948,10 +1084,24 @@ app.post('/api/serials', async (req, res) => {
                 .input('TestFechaRegistro', sql.DateTime, testFechaRegistro || null)
                 .input('TestSensorFW', sql.NVarChar, testSensorFW || null)
                 .query('UPDATE Serials SET OrderNumber=@ON, PartNumberId=@PN, CurrentOperationId=@OpId, IsComplete=@IsComp, TrayId=@TrayId, TestFechaRegistro=@TestFechaRegistro, TestSensorFW=@TestSensorFW WHERE SerialNumber=@SN');
+            
+            // Registrar historial solo si cambió la operación
+            if (check.recordset[0].CurrentOperationId !== currentOperationId && currentOperationId && operatorId) {
+                const historyRequest = transaction.request(); // New request for history
+                await historyRequest
+                    .input('sn_hist', sql.NVarChar, serialNumber)
+                    .input('oid_hist', sql.NVarChar, currentOperationId)
+                    .input('uid_hist', sql.NVarChar, operatorId)
+                    .input('ts_hist', sql.DateTime, now)
+                    .query('INSERT INTO SerialHistory (SerialNumber, OperationId, OperatorId, Timestamp) VALUES (@sn_hist, @oid_hist, @uid_hist, @ts_hist)');
+            }
+            await transaction.commit();
             return res.json({ success: true, updated: true });
+
         } else {
             // Insertar nuevo
-            await req.db.request()
+            const insertRequest = transaction.request();
+            await insertRequest
                 .input('SN', sql.NVarChar, serialNumber)
                 .input('ON', sql.NVarChar, orderNumber)
                 .input('PN', sql.NVarChar, partNumberId)
@@ -961,9 +1111,24 @@ app.post('/api/serials', async (req, res) => {
                 .input('TestFechaRegistro', sql.DateTime, testFechaRegistro || null)
                 .input('TestSensorFW', sql.NVarChar, testSensorFW || null)
                 .query('INSERT INTO Serials (SerialNumber, OrderNumber, PartNumberId, CurrentOperationId, IsComplete, TrayId, TestFechaRegistro, TestSensorFW) VALUES (@SN, @ON, @PN, @OpId, @IsComp, @TrayId, @TestFechaRegistro, @TestSensorFW)');
+            
+            // Registrar historial si hay currentOperationId y operatorId
+            if (currentOperationId && operatorId) {
+                const historyRequest = transaction.request();
+                await historyRequest
+                    .input('sn_hist', sql.NVarChar, serialNumber)
+                    .input('oid_hist', sql.NVarChar, currentOperationId)
+                    .input('uid_hist', sql.NVarChar, operatorId)
+                    .input('ts_hist', sql.DateTime, now)
+                    .query('INSERT INTO SerialHistory (SerialNumber, OperationId, OperatorId, Timestamp) VALUES (@sn_hist, @oid_hist, @uid_hist, @ts_hist)');
+            }
+            await transaction.commit();
             return res.json({ success: true, created: true });
         }
     } catch (e) {
+        if (transaction.active) {
+            await transaction.rollback();
+        }
         res.status(500).json({ error: e.message });
     }
 });

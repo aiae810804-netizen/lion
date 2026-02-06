@@ -95,6 +95,7 @@ export interface SerialUnit {
   orderNumber: string; // This refers to the LOT NUMBER
   partNumberId: string;
   currentOperationId: string;
+  operatorId?: string; // ID of user making the change
   trayId?: string; // New Field for Lot Based Trays
   history: {
     operationId: string;

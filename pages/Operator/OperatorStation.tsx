@@ -105,8 +105,6 @@ export default function OperatorStation() {
   return <StationInterface operation={selectedOp} route={selectedRoute} onBack={handleBackToOps} user={user!} />;
 }
 
-import OrderProgress from './components/OrderProgress';
-
 // --- ACTUAL SCANNING INTERFACE ---
 
 interface StationProps {
@@ -120,13 +118,14 @@ function StationInterface({ operation, route, onBack, user }: StationProps) {
   const { showLoading, hideLoading, showAlert, showConfirm } = useAlert();
 
   // Global State
-  const [activeOrders, setActiveOrders] = useState<WorkOrder[] | null>(null);
-  const [activeParts, setActiveParts] = useState<PartNumber[]>([]);
+  const [activeOrder, setActiveOrder] = useState<WorkOrder | null>(null);
+  const [activeOrderPart, setActiveOrderPart] = useState<PartNumber | null>(null);
   const [allOrderSerials, setAllOrderSerials] = useState<SerialUnit[]>([]); // For summary
   
   // Scanning State
   const [serialInput, setSerialInput] = useState('');
   const [statusMsg, setStatusMsg] = useState<{ type: 'success' | 'error' | 'info', text: string } | null>(null);
+  const [scannedCount, setScannedCount] = useState(0);
 
   // Resume Context (SAP Order Scan or Tray Scan)
   const [contextInput, setContextInput] = useState('');
@@ -173,76 +172,66 @@ function StationInterface({ operation, route, onBack, user }: StationProps) {
     db.getOperations().then(setAllOps);
   }, [operation]);
 
-  // Update serials for all active orders
+  // Update scanned count
   useEffect(() => {
-    if (activeOrders && activeOrders.length > 0) {
+    if (activeOrder) {
         // Refresh Order Summary context
         db.getSerials().then(serials => {
-             const relevant = serials.filter(s => activeOrders.some(o => o.orderNumber === s.orderNumber));
+             const relevant = serials.filter(s => s.orderNumber === activeOrder.orderNumber);
              setAllOrderSerials(relevant);
-             // scannedCount is no longer a single value. Each OrderProgress component calculates its own count.
+             setScannedCount(relevant.length);
         });
-    } else {
-        setAllOrderSerials([]);
     }
-  }, [activeOrders, statusMsg, trayGenerated]);
+  }, [activeOrder, statusMsg, trayGenerated]);
 
   // --- SMART AUTO-ENTER LOGIC FOR ORDER SETUP (INITIAL) ---
-  useEffect(() => {
-    if (operation.isInitial && !activeOrders && sapOrderInput.length === 10) {
-      validateAndProceedSAP(sapOrderInput);
-    }
-  }, [sapOrderInput, operation.isInitial, activeOrders]);
+  useEffect(() => { 
+      if (operation.isInitial && !activeOrder && sapOrderInput.length === 10) {
+          validateAndProceedSAP(sapOrderInput);
+      } 
+  }, [sapOrderInput]);
 
   const validateAndProceedSAP = async (sapOrder: string) => {
-    showLoading("Validando Orden SAP...");
-    try {
-      const allWorkOrders = await db.getOrders();
-      let matchingOrders = allWorkOrders.filter(wo => wo.sapOrderNumber === sapOrder);
+      showLoading("Validando Orden SAP...");
+      try {
+          const orders = await db.getOrders();
+          const match = orders.find(o => o.sapOrderNumber === sapOrder);
 
-      if (matchingOrders.length > 0) {
-        matchingOrders = matchingOrders.filter(o => o.status !== 'CLOSED');
-        
-        if (matchingOrders.length === 0) {
-            throw new Error("Esta orden SAP ya está CERRADA.");
-        }
+          if (match) {
+              if (match.status === 'CLOSED') {
+                  throw new Error("Esta orden SAP ya está CERRADA.");
+              }
+              
+              const parts = await db.getParts();
+              const part = parts.find(p => p.id === match.partNumberId);
 
-        const allParts = await db.getParts();
-        const orderParts = await Promise.all(
-            matchingOrders.map(order => allParts.find(p => p.id === order.partNumberId))
-        );
+              // STRICT ROUTE VALIDATION (INITIAL RESUME)
+              if (part && part.processRouteId && part.processRouteId !== route.id) {
+                 throw new Error(`Error de Ruta: El modelo ${part.productCode} pertenece a otra ruta (${route.name} seleccionada). Regrese y seleccione la ruta correcta.`);
+              }
+              
+              // If order exists and is OPEN, resume context immediately
+              const allSerials = await db.getSerials();
+              const orderSerials = allSerials.filter(s => s.orderNumber === match.orderNumber);
+                  
+              setActiveOrder(match);
+              setActiveOrderPart(part || null);
+              setAllOrderSerials(orderSerials);
+              setQtyInput(match.quantity.toString());
+              setModelInput(part?.productCode || '');
+              
+              setStatusMsg({ type: 'success', text: "Orden SAP existente. Resumiendo proceso..." });
+              return;
+          }
 
-        for (const part of orderParts) {
-            if (part && part.processRouteId && part.processRouteId !== route.id) {
-                throw new Error(`Error de Ruta: El modelo ${part.productCode} pertenece a otra ruta. Regrese y seleccione la ruta correcta.`);
-            }
-        }
-        
-        const allSerials = await db.getSerials();
-        const orderSerials = allSerials.filter(s => matchingOrders.some(o => o.orderNumber === s.orderNumber));
-        
-        setActiveOrders(matchingOrders);
-        setActiveParts(orderParts.filter(p => p) as PartNumber[]);
-        setAllOrderSerials(orderSerials);
-        
-        // For single-order cases, populate the setup form for context
-        if (matchingOrders.length === 1) {
-            setQtyInput(matchingOrders[0].quantity.toString());
-            setModelInput(orderParts[0]?.productCode || '');
-        }
-
-        setStatusMsg({ type: 'success', text: `Orden SAP existente con ${matchingOrders.length} lote(s). Resumiendo proceso...` });
-        return;
+          // If not found, proceed to Step 2 to Create New
+          setSetupStep(2);
+      } catch (e: any) {
+          showAlert("Alerta de Validación", e.message, "warning");
+          setSapOrderInput('');
+      } finally {
+          hideLoading();
       }
-
-      // If not found, proceed to Step 2 to Create New
-      setSetupStep(2);
-    } catch (e: any) {
-      showAlert("Alerta de Validación", e.message, "warning");
-      setSapOrderInput('');
-    } finally {
-      hideLoading();
-    }
   };
 
   useEffect(() => { if (setupStep === 2) setTimeout(() => qtyRef.current?.focus(), 100); else if (setupStep === 3) setTimeout(() => modelRef.current?.focus(), 100); }, [setupStep]);
@@ -262,63 +251,56 @@ function StationInterface({ operation, route, onBack, user }: StationProps) {
       showLoading("Buscando Contexto...");
       
       try {
-          const allOrders = await db.getOrders();
-          const allParts = await db.getParts();
+          const orders = await db.getOrders();
+          const parts = await db.getParts();
           const allSerials = await db.getSerials();
           
-          let matchingOrders = allOrders.filter(o => o.sapOrderNumber === inputVal && o.status === 'OPEN');
+          let match = orders.find(o => o.sapOrderNumber === inputVal && o.status === 'OPEN');
           let fromTray = false;
           let trayIdFound = '';
 
           // If NOT found by SAP Order, check if it's a TRAY ID
-          if (matchingOrders.length === 0) {
+          if (!match) {
              const traySerials = await db.getSerialsByTray(inputVal);
              if (traySerials.length > 0) {
-                 const orderNumbersInTray = [...new Set(traySerials.map(s => s.orderNumber))];
-                 const potentialOrders = allOrders.filter(o => orderNumbersInTray.includes(o.orderNumber) && o.status === 'OPEN');
-                 
-                 if (potentialOrders.length > 0) {
-                     // We assume all orders in a tray belong to the same SAP order.
-                     // Let's take the SAP order from the first one and load all associated open lots.
-                     const sapOrderForTray = potentialOrders[0].sapOrderNumber;
-                     matchingOrders = allOrders.filter(o => o.sapOrderNumber === sapOrderForTray && o.status === 'OPEN');
-                     fromTray = true;
-                     trayIdFound = inputVal;
+                 for (const s of traySerials) {
+                     const potentialOrder = orders.find(o => o.orderNumber === s.orderNumber && o.status === 'OPEN');
+                     if (potentialOrder) {
+                         match = potentialOrder;
+                         fromTray = true;
+                         trayIdFound = inputVal;
+                         break;
+                     }
                  }
              }
           }
           
-          if (matchingOrders.length === 0) throw new Error("Orden SAP no encontrada, cerrada, o Charola no válida.");
+          if (!match) throw new Error("Orden SAP no encontrada, cerrada, o Charola no válida.");
           
-          const matchingParts = matchingOrders.map(order => allParts.find(p => p.id === order.partNumberId)).filter(p => p) as PartNumber[];
+          const part = parts.find(p => p.id === match.partNumberId);
           
-          // STRICT ROUTE VALIDATION
-          for (const part of matchingParts) {
-              if (part.processRouteId && part.processRouteId !== route.id) {
-                   throw new Error(`Error de Ruta: El modelo ${part.productCode} no se puede correr en esta ruta.`);
-              }
+          // STRICT ROUTE VALIDATION (INTERMEDIATE)
+          if (part && part.processRouteId && part.processRouteId !== route.id) {
+               throw new Error(`Error de Ruta: El modelo ${part.productCode} no se puede correr en esta ruta. Regrese y seleccione la correcta.`);
           }
 
-          const orderSerials = allSerials.filter(s => matchingOrders.some(o => o.orderNumber === s.orderNumber));
+          const orderSerials = allSerials.filter(s => s.orderNumber === match!.orderNumber);
           setAllOrderSerials(orderSerials);
           
-          setActiveOrders(matchingOrders);
-          setActiveParts(matchingParts);
+          setActiveOrder(match);
+          setActiveOrderPart(part || null);
           setContextInput('');
 
           if (fromTray) {
               setStatusMsg({ type: 'success', text: "Charola detectada. Contexto cargado." });
               const traySerials = await db.getSerialsByTray(trayIdFound);
-              const firstPartId = traySerials.length > 0 ? traySerials[0].partNumberId : null;
-              const partForTray = matchingParts.find(p => p.id === firstPartId);
-
-              if (partForTray) {
-                  processLoadedTray(traySerials.filter(s => matchingOrders.some(o => o.orderNumber === s.orderNumber)), trayIdFound, partForTray, route);
-              } else if (traySerials.length > 0) {
-                   throw new Error("No se encontró el número de parte para la charola.");
-              }
+              processLoadedTray(traySerials.filter(s => s.orderNumber === match!.orderNumber), trayIdFound, part!, route);
           } else {
-               setStatusMsg({ type: 'success', text: `Orden cargada con ${matchingOrders.length} lotes. Proceda.` });
+               if (orderSerials.length >= match.quantity && orderSerials.every(s => s.isComplete)) {
+                  setStatusMsg({ type: 'success', text: "Orden Completada. Puede escanear para revisión." });
+              } else {
+                  setStatusMsg({ type: 'success', text: "Orden cargada. Proceda." });
+              }
           }
 
       } catch (e: any) {
@@ -384,7 +366,18 @@ function StationInterface({ operation, route, onBack, user }: StationProps) {
       }
   }
 
-  const handleFinishSetup = async () => {
+  const handleFinishSetup = async (existingOrder?: WorkOrder, existingPart?: PartNumber) => {
+      if (existingOrder && existingPart) {
+           // STRICT ROUTE VALIDATION (MANUAL RESUME)
+           if (existingPart.processRouteId && existingPart.processRouteId !== route.id) {
+               showAlert("Error de Ruta", `El modelo ${existingPart.productCode} no se puede correr en la ruta "${route.name}". Regrese y seleccione la correcta.`, "error");
+               return;
+           }
+           setActiveOrder(existingOrder);
+           setActiveOrderPart(existingPart);
+           return;
+      }
+
       if (!sapOrderInput || !qtyInput || !modelInput) return;
 
       // PRE-VALIDATION: Check if scanned Model belongs to current Route BEFORE generating anything
@@ -422,8 +415,8 @@ function StationInterface({ operation, route, onBack, user }: StationProps) {
                      throw new Error(`Error de Ruta: El modelo ${part.productCode} está asignado a otra ruta.`);
                   }
 
-                  setActiveOrders([order]);
-                  if(part) setActiveParts([part]);
+                  setActiveOrderPart(part || null);
+                  setActiveOrder(order);
                   setStatusMsg({ type: 'success', text: `Lote ${res.orderNumber} Creado` });
 
                   if (part) {
@@ -459,13 +452,11 @@ function StationInterface({ operation, route, onBack, user }: StationProps) {
 
   // --- REPRINT LOGIC ---
   const handleReprint = async () => {
-      if (!activeOrders || activeOrders.length !== 1 || !activeParts || activeParts.length !== 1) return;
-      const order = activeOrders[0];
-      const part = activeParts[0];
+      if (!activeOrder || !activeOrderPart) return;
       showLoading("Enviando a impresora...");
       try {
-          await db.printLabel(order.orderNumber, part.partNumber, {
-              sku: part.productCode, quantity: reprintQty, excludeLabelTypes: ['NAMEPLATE'], jobDescription: `Reprint ${order.orderNumber}`
+          await db.printLabel(activeOrder.orderNumber, activeOrderPart.partNumber, {
+              sku: activeOrderPart.productCode, quantity: reprintQty, excludeLabelTypes: ['NAMEPLATE'], jobDescription: `Reprint ${activeOrder.orderNumber}`
           });
           showAlert("Éxito", "Reimpresión enviada correctamente.", "success");
           setIsReprinting(false); setReprintQty(1);
@@ -474,9 +465,7 @@ function StationInterface({ operation, route, onBack, user }: StationProps) {
 
   // --- SPECIFIC SUFFIX REPRINT LOGIC (For Lot Based in Empaque) ---
   const handleReprintSuffix = async () => {
-      if (!reprintSuffix || !activeOrders || activeOrders.length !== 1 || !activeParts || activeParts.length !== 1) return;
-      const part = activeParts[0];
-
+      if (!reprintSuffix || !activeOrder || !activeOrderPart) return;
       if (reprintSuffix.length !== 3) {
           showAlert("Error", "Debe ingresar exactamente los 3 dígitos (ej. 003).", "warning");
           return;
@@ -490,8 +479,8 @@ function StationInterface({ operation, route, onBack, user }: StationProps) {
               throw new Error(`Serial con terminación ...-${reprintSuffix}M no encontrado en esta charola.`);
           }
 
-          await db.printLabel(match.serialNumber, part.partNumber, {
-              sku: part.productCode,
+          await db.printLabel(match.serialNumber, activeOrderPart.partNumber, {
+              sku: activeOrderPart.productCode,
               jobDescription: `Reprint Single ${match.serialNumber}`,
               excludeLabelTypes: ['CARTON1', 'CARTON2'] 
           });
@@ -506,59 +495,12 @@ function StationInterface({ operation, route, onBack, user }: StationProps) {
       }
   }
 
-  // --- HANDLER: Reimpresión de Lote (por sufijo) ---
-  const handleLotReprint = async () => {
-    if (!lotReprintSuffix || lotReprintSuffix.length !== 3 || !activeOrders || activeOrders.length !== 1 || !activeParts || activeParts.length !== 1) return;
-    const part = activeParts[0];
-    showLoading("Buscando serial...");
-    try {
-      const match = traySerials.find(s => s.serialNumber.endsWith(`-${lotReprintSuffix}M`));
-      if (!match) {
-        throw new Error(`Serial con terminación ...-${lotReprintSuffix}M no encontrado en esta charola.`);
-      }
-      await db.printLabel(match.serialNumber, part.partNumber, {
-        sku: part.productCode,
-        jobDescription: `Reprint Single ${match.serialNumber}`,
-        excludeLabelTypes: ['CARTON1', 'CARTON2']
-      });
-      showAlert("Éxito", `Reimpresión enviada para ${match.serialNumber}", "success`);
-    } catch (e: any) {
-      showAlert("Error", e.message, "error");
-    } finally {
-      hideLoading();
-    }
-  };
-
-  // --- HANDLER: Reimpresión de Accesorios ---
-  const handleAccessoryReprint = async () => {
-    if (!activeOrders || activeOrders.length !== 1 || !activeParts || activeParts.length !== 1) return;
-    const order = activeOrders[0];
-    const part = activeParts[0];
-    showLoading("Enviando a impresora...");
-    try {
-      await db.printLabel(order.orderNumber, part.partNumber, {
-        sku: part.productCode,
-        quantity: accessoryReprintQty,
-        excludeLabelTypes: ['NAMEPLATE'],
-        jobDescription: `Reprint ${order.orderNumber}`
-      });
-      showAlert("Éxito", "Reimpresión enviada correctamente.", "success");
-    } catch (e: any) {
-      showAlert("Error", e.message, "error");
-    } finally {
-      hideLoading();
-    }
-  };
-
   // --- TRAY GENERATION (INITIAL) ---
   const handleScanTrayInitial = async (e: React.FormEvent) => {
       e.preventDefault();
-      if (!trayInput || !activeOrders || activeOrders.length !== 1 || !activeParts || activeParts.length !== 1) return;
-      const order = activeOrders[0];
-      const part = activeParts[0];
+      if (!trayInput || !activeOrder || !activeOrderPart) return;
       
-      const serialsForOrder = allOrderSerials.filter(s => s.orderNumber === order.orderNumber);
-      const remaining = order.quantity - serialsForOrder.length;
+      const remaining = activeOrder.quantity - scannedCount;
       
       if (remaining <= 0) {
           showAlert("Orden Completa", "La orden ya ha alcanzado la cantidad requerida.", "info");
@@ -571,8 +513,8 @@ function StationInterface({ operation, route, onBack, user }: StationProps) {
       showLoading(`Generando ${quantityToGenerate} Seriales...`);
       try {
           const res = await db.generateBatchSerials({
-              orderNumber: order.orderNumber,
-              partNumberId: part.id,
+              orderNumber: activeOrder.orderNumber,
+              partNumberId: activeOrderPart.id,
               currentOperationId: operation.id,
               trayId: trayInput,
               operatorId: user.id,
@@ -582,8 +524,8 @@ function StationInterface({ operation, route, onBack, user }: StationProps) {
           if (res.success) {
               // GENERATE CSV WITH TIMESTAMP
               const timestamp = new Date().toISOString().replace(/[:T-]/g, '').slice(0, 14); 
-              const filename = `${sapOrderInput}_CHAROLA_${trayInput}_${order.orderNumber}.csv`;
-              const csvContent = "PN,SKU,SERIAL\n" + res.serials.map(s => `${part.partNumber},${part.productCode},${s.serialNumber}`).join("\n");
+              const filename = `${sapOrderInput}_CHAROLA_${trayInput}_${activeOrder.orderNumber}.csv`;
+              const csvContent = "PN,SKU,SERIAL\n" + res.serials.map(s => `${activeOrderPart.partNumber},${activeOrderPart.productCode},${s.serialNumber}`).join("\n");
               
               setLastCsvData({ content: csvContent, filename: filename });
               
@@ -594,9 +536,8 @@ function StationInterface({ operation, route, onBack, user }: StationProps) {
               setTrayGenerated(true); 
               setTrayIsFinished(false);
               
-              // This will trigger the useEffect to refresh serials
-              const updatedSerials = await db.getSerials();
-              setAllOrderSerials(updatedSerials.filter(s => activeOrders.some(o => o.orderNumber === s.orderNumber)));
+              const allSerials = await db.getSerials();
+              setScannedCount(allSerials.filter(s => s.orderNumber === activeOrder.orderNumber).length);
           }
       } catch (e: any) {
           showAlert("Charola Ocupada / Error", e.message, "error");
@@ -631,18 +572,15 @@ function StationInterface({ operation, route, onBack, user }: StationProps) {
   // --- TRAY PROCESSING (INTERMEDIATE/FINAL) ---
   const handleScanTrayProcessing = async (e: React.FormEvent) => {
       e.preventDefault();
-      if (!trayInput || !activeOrders || activeOrders.length !== 1 || !activeParts || activeParts.length !== 1) return;
-      const order = activeOrders[0];
-      const part = activeParts[0];
-
+      if (!trayInput || !activeOrder || !activeOrderPart) return; 
       showLoading("Cargando Charola...");
       try {
           const allSerials = await db.getSerialsByTray(trayInput);
-          let serials = allSerials.filter(s => s.orderNumber === order.orderNumber);
+          let serials = allSerials.filter(s => s.orderNumber === activeOrder.orderNumber);
           
           if (serials.length === 0) throw new Error("Charola no contiene unidades activas para esta orden.");
           
-          processLoadedTray(serials, trayInput, part, route);
+          processLoadedTray(serials, trayInput, activeOrderPart, route);
 
           setTrayInput('');
       } catch (e: any) {
@@ -664,7 +602,7 @@ function StationInterface({ operation, route, onBack, user }: StationProps) {
           const updatedList = traySerials.map(s => s.serialNumber === serial.serialNumber ? { ...s, history: newHistory, currentOperationId: operation.id } : s);
           setTraySerials(updatedList);
 
-          await db.saveSerial({ ...serial, currentOperationId: operation.id, history: newHistory });
+          await db.saveSerial({ ...serial, currentOperationId: operation.id, history: newHistory, operatorId: user.id });
 
       } catch (e) {}
   };
@@ -735,7 +673,7 @@ function StationInterface({ operation, route, onBack, user }: StationProps) {
            return;
       }
 
-      if (!activeTrayId || traySerials.length === 0 || !activeOrders) return;
+      if (!activeTrayId || traySerials.length === 0) return;
       const confirmed = await showConfirm("Procesar Charola", `¿Confirmar empaque e impresión de etiquetas para ${traySerials.length} unidades?`);
       if (!confirmed) return;
 
@@ -759,7 +697,7 @@ function StationInterface({ operation, route, onBack, user }: StationProps) {
           setTraySerials([]);
           
           const all = await db.getSerials();
-          setAllOrderSerials(all.filter(s => activeOrders.some(o => o.orderNumber === s.orderNumber)));
+          setAllOrderSerials(all.filter(s => s.orderNumber === activeOrder!.orderNumber));
 
       } catch (e: any) {
           showAlert("Error", e.message, "error");
@@ -767,30 +705,28 @@ function StationInterface({ operation, route, onBack, user }: StationProps) {
   };
 
   const handleFinishAccessories = async () => {
-      if (!activeOrders || activeOrders.length !== 1 || !activeParts || activeParts.length !== 1) return;
-      const order = activeOrders[0];
-      const part = activeParts[0];
+      if (!activeOrder || !activeOrderPart) return;
 
-      showLoading("Registrando y cerrando orden...");
+      showLoading("Registrando unidades completadas...");
       try {
           await db.generateBatchSerials({
-              orderNumber: order.orderNumber,
-              partNumberId: part.id,
+              orderNumber: activeOrder.orderNumber,
+              partNumberId: activeOrderPart.id,
               currentOperationId: operation.id,
               operatorId: user.id,
-              quantity: order.quantity, 
+              quantity: activeOrder.quantity, 
               autoComplete: true 
           });
-
-          // Explicitly close the order
-          const updatedOrder = { ...order, status: 'CLOSED' as 'CLOSED' };
-          // @ts-ignore
-          await db.updateOrder(updatedOrder);
           
           showAlert("Orden Completada", "La orden de accesorios ha sido registrada y cerrada correctamente.", "success");
           
-          // Reset the UI
-          closeOrderAndReset();
+          setActiveOrder(null);
+          setActiveOrderPart(null);
+          setSapOrderInput('');
+          setQtyInput('');
+          setModelInput('');
+          setSetupStep(1);
+          setStatusMsg(null);
       } catch (e: any) {
           showAlert("Error", "Error al finalizar orden de accesorios: " + e.message, "error");
       } finally {
@@ -798,44 +734,9 @@ function StationInterface({ operation, route, onBack, user }: StationProps) {
       }
   };
 
-  // --- HANDLER: Cerrar orden y resetear UI ---
-  const closeOrderAndReset = () => {
-    setActiveOrders(null);
-    setActiveParts([]);
-    setAllOrderSerials([]);
-    setTraySerials([]);
-    setActiveTrayId(null);
-    setTrayGenerated(false);
-    setTrayIsFinished(false);
-    setStatusMsg(null);
-    setContextInput('');
-    setSerialInput('');
-    setLastCsvData(null);
-    setSelectAll(false);
-  };
-
-  // --- HANDLER: Finalizar y Cerrar Orden (DB + UI) ---
-  const finishAndCloseOrder = async () => {
-      if (!activeOrders) return;
-      showLoading("Finalizando orden...");
-      try {
-          await Promise.all(activeOrders.map(async (order) => {
-              const updatedOrder = { ...order, status: 'CLOSED' as 'CLOSED' };
-              // @ts-ignore
-              await db.updateOrder(updatedOrder);
-          }));
-          showAlert("Éxito", "Orden finalizada y cerrada.", "success");
-          closeOrderAndReset();
-      } catch (e: any) {
-          showAlert("Error", "No se pudo finalizar la orden: " + e.message, "error");
-      } finally {
-          hideLoading();
-      }
-  };
-
   const handleChangeContext = () => {
-      setActiveOrders(null);
-      setActiveParts([]);
+      setActiveOrder(null);
+      setActiveOrderPart(null);
       setActiveTrayId(null);
       setTraySerials([]);
       setContextInput('');
@@ -845,72 +746,39 @@ function StationInterface({ operation, route, onBack, user }: StationProps) {
   useEffect(() => {
       if (!serialInput) return;
       let shouldSubmit = false;
-      if (activeParts.length > 0) {
-          for (const part of activeParts) {
-              if (part.serialMask && (serialInput.length === part.serialMask.length || serialInput.length === part.serialMask.length + 1)) {
-                  shouldSubmit = true;
-                  break;
-              }
-          }
+      if (activeOrderPart) {
+           if (serialInput.length === activeOrderPart.serialMask.length || serialInput.length === activeOrderPart.serialMask.length+1) shouldSubmit = true;
       }
       if (shouldSubmit) {
           if (timerRef.current) clearTimeout(timerRef.current);
           timerRef.current = window.setTimeout(() => handleSerialScan(null), 200);
       }
       return () => { if (timerRef.current) clearTimeout(timerRef.current); }
-  }, [serialInput, activeParts]);
+  }, [serialInput]);
 
   const handleSerialScan = async (e: React.FormEvent | null) => {
     if (e) e.preventDefault();
-    const serial = serialInput.trim();
-    if (!serial) return;
+    if (!serialInput.trim()) return;
     if (timerRef.current) clearTimeout(timerRef.current);
 
     showLoading("Procesando...");
     try {
-        if (!activeOrders || activeOrders.length === 0) throw new Error("No hay orden activa.");
-
-        // Find matching part and order by serial mask
-        let targetPart: PartNumber | null = null;
-        let targetOrder: WorkOrder | null = null;
-        const cleanedSerial = serial.replace(/([A-Za-z])$/, "");
-
-        for (const part of activeParts) {
-            // Make sure mask is not empty and is a string
-            if (part.serialMask && typeof part.serialMask === 'string') {
-                 const regex = new RegExp('^' + part.serialMask.replace(/#/g, '\\d') + '$');
-                 if (regex.test(cleanedSerial)) {
-                    targetPart = part;
-                    break;
-                }
-            }
-        }
-        
-        if (targetPart) {
-            targetOrder = activeOrders.find(o => o.partNumberId === targetPart!.id) || null;
-        }
-
-        if (!targetOrder || !targetPart) {
-            throw new Error(`Serial ${serial} no corresponde a ningún modelo en la orden activa.`);
-        }
-
       let testLog: { serialNumber: string, fechaRegistro: string, sensorFW: string } | null = null;
-      if (operation.requireTestLog && targetPart.serialGenType === 'PCB_SERIAL') {
-        testLog = await db.getTestLogBySerial(serial);
+      // Validación: Si la operación requiere test log y el tipo es PCB_SERIAL
+      if (operation.requireTestLog && activeOrderPart?.serialGenType === 'PCB_SERIAL') {
+        testLog = await db.getTestLogBySerial(serialInput.trim());
         if (!testLog) {
           throw new Error("El número de serie no ha sido probado o no ha pasado la prueba funcional.");
         }
       }
-
-      const existingSerial = await db.getSerial(serial);
-      if (existingSerial && existingSerial.orderNumber !== targetOrder.orderNumber) {
+      // Validación: verificar si el serial ya está ligado a otra orden
+      const existingSerial = await db.getSerial(serialInput.trim());
+      if (existingSerial && activeOrder && existingSerial.orderNumber !== activeOrder.orderNumber) {
         throw new Error("El número de serie ya está ligado a otra orden.");
       }
-
-      if (operation.isInitial) await processInitialOp(serial, targetOrder, targetPart, testLog);
-      else if (operation.isFinal) await processFinalOp(serial, targetOrder, targetPart);
-      else await processStandardOp(serial, targetOrder, targetPart);
-
+      if (operation.isInitial) await processInitialOp(serialInput.trim(), testLog);
+      else if (operation.isFinal) await processFinalOp(serialInput.trim());
+      else await processStandardOp(serialInput.trim());
     } catch (err: any) {
       showAlert("Error", err.message, "error");
       setStatusMsg({ type: 'error', text: err.message });
@@ -921,94 +789,110 @@ function StationInterface({ operation, route, onBack, user }: StationProps) {
     }
   };
 
-  const processInitialOp = async (serial: string, order: WorkOrder, part: PartNumber, testLog?: { serialNumber: string, fechaRegistro: string, sensorFW: string }) => {
-    const serialsForOrder = allOrderSerials.filter(s => s.orderNumber === order.orderNumber);
-    if (serialsForOrder.length >= order.quantity) throw new Error(`Orden para ${part.productCode} completada.`);
-    
-    const cleanedSerial = serial.replace(/([A-Za-z])$/, ""); 
-    const regexStr = '^' + part.serialMask.replace(/#/g, '\\d') + '$';
-    if (!new RegExp(regexStr).test(cleanedSerial)) throw new Error("Formato de serial inválido para este modelo.");
+  // Modificado para aceptar testLog opcional
+  const processInitialOp = async (serial: string, testLog?: { serialNumber: string, fechaRegistro: string, sensorFW: string }) => {
+    if (!activeOrder || !activeOrderPart) throw new Error("No hay orden activa.");
+    if (scannedCount >= activeOrder.quantity) throw new Error("Orden completada.");
+    serial = serial.replace(/([A-Za-z])$/, ""); 
+    const regexStr = '^' + activeOrderPart.serialMask.replace(/#/g, '\\d') + '$';
+    if (!new RegExp(regexStr).test(serial)) throw new Error("Formato inválido.");
 
     await db.saveSerial({
-      serialNumber: cleanedSerial, orderNumber: order.orderNumber, partNumberId: part.id, currentOperationId: operation.id, isComplete: false,
+      serialNumber: serial, orderNumber: activeOrder.orderNumber, partNumberId: activeOrder.partNumberId, currentOperationId: operation.id, isComplete: false, operatorId: user.id,
       history: [{ operationId: operation.id, operationName: operation.name, operatorId: user.id, operatorName: user.name, timestamp: new Date().toISOString() }], printHistory: [],
+      // Guardar datos de prueba funcional si existen
       ...(testLog ? { testFechaRegistro: testLog.fechaRegistro, testSensorFW: testLog.sensorFW } : {})
     });
 
-    if (part.serialGenType === 'PCB_SERIAL') {
+    if (activeOrderPart.serialGenType === 'PCB_SERIAL') {
         try {
-             await db.printLabel(cleanedSerial, part.partNumber, {
-                 sku: part.productCode,
+             await db.printLabel(serial, activeOrderPart.partNumber, {
+                 sku: activeOrderPart.productCode,
                  quantity: 1,
-                 excludeLabelTypes: ['NAMEPLATE', 'BOX_LABEL'],
-                 jobDescription: `Initial Serial ${cleanedSerial}`
+                 excludeLabelTypes: ['NAMEPLATE', 'BOX_LABEL'], 
+                 jobDescription: `Initial Serial ${serial}`
              });
         } catch (e) {
             console.error("Auto-print error", e);
         }
     }
 
-    setStatusMsg({ type: 'success', text: `Serial ${cleanedSerial} OK` });
+    setStatusMsg({ type: 'success', text: `Serial ${serial} OK` });
   };
 
-  const processStandardOp = async (serial: string, order: WorkOrder, part: PartNumber) => {
+  const processStandardOp = async (serial: string) => {
     const unit = await db.getSerial(serial);
     if (!unit) throw new Error("Serial no existe.");
-    if (unit.orderNumber !== order.orderNumber) throw new Error("Serial no pertenece a este lote de la orden.");
+    if (activeOrder && unit.orderNumber !== activeOrder.orderNumber) throw new Error("Serial pertenece a otra orden.");
     
     unit.currentOperationId = operation.id;
     unit.history.push({ operationId: operation.id, operationName: operation.name, operatorId: user.id, operatorName: user.name, timestamp: new Date().toISOString() });
-    await db.saveSerial(unit);
+    await db.saveSerial({ ...unit, operatorId: user.id });
     setStatusMsg({ type: 'success', text: `${serial} OK` });
   };
 
-  const processFinalOp = async (serial: string, order: WorkOrder, part: PartNumber) => {
+  const processFinalOp = async (serial: string) => {
     const unit = await db.getSerial(serial);
     if (!unit) throw new Error("Serial no encontrado.");
-    if (unit.orderNumber !== order.orderNumber) throw new Error("Serial no pertenece a este lote de la orden.");
+    if (activeOrder && unit.orderNumber !== activeOrder.orderNumber) throw new Error("Serial pertenece a otra orden.");
 
+    const parts = await db.getParts();
+    const part = parts.find(p => p.id === unit.partNumberId);
     unit.currentOperationId = operation.id; unit.isComplete = true;
     unit.history.push({ operationId: operation.id, operationName: operation.name, operatorId: user.id, operatorName: user.name, timestamp: new Date().toISOString() });
-    await db.saveSerial(unit);
+    await db.saveSerial({ ...unit, operatorId: user.id });
+    
+    let statusText = "";
     try {
-        await db.printLabel(serial, part.partNumber, { 
+        await db.printLabel(serial, part?.partNumber || "UNKNOWN", { 
             jobDescription: `Empaque ${serial}`, 
-            sku: part.productCode,
-            excludeLabelTypes: ['CARTON1', 'CARTON2'] 
+            sku: part?.productCode,
+            excludeLabelTypes: ['CARTON1', 'CARTON2', 'BOX_LABEL'] 
         });
-        setStatusMsg({ type: 'success', text: `Etiqueta generada ${serial}` });
+        statusText = `Etiqueta generada ${serial}`;
     } catch (e: any) {
-        setStatusMsg({ type: 'success', text: `${serial} OK (Fallo Impresión)` });
+        statusText = `${serial} OK (Fallo Impresión)`;
     }
+
+    if (activeOrder) {
+        const allSerials = await db.getSerials();
+        const relevant = allSerials.filter(s => s.orderNumber === activeOrder.orderNumber);
+        const completedInStation = relevant.filter(s => s.history.some(h => h.operationId === operation.id)).length;
+
+        if (completedInStation >= activeOrder.quantity) {
+            try {
+                const configs = await db.getLabelConfigs();
+                const boxLabelConfig = configs.find(c => c.sku === part?.productCode && c.labelType === 'BOX_LABEL');
+                if (boxLabelConfig) {
+                    await db.printLabel(activeOrder.orderNumber, part?.partNumber || "", { sku: part?.productCode, quantity: 1, jobDescription: `Box Label ${activeOrder.orderNumber}`, labelType: 'BOX_LABEL' });
+                    statusText += " + ETIQUETA CAJA";
+                }
+            } catch (e) { console.error(e); }
+        }
+    }
+    setStatusMsg({ type: 'success', text: statusText });
   };
 
   // --- IMPRIMIR ETIQUETA DE CAJA (BOX_LABEL) ---
   const [isPrintingBoxLabel, setIsPrintingBoxLabel] = useState(false);
   const handlePrintBoxLabel = async () => {
-      if (!activeOrders || activeOrders.length !== 1 || !activeParts || activeParts.length !== 1) {
-        showAlert("Ambigüedad", "La impresión de etiquetas de caja solo está disponible para un lote a la vez.", "info");
-        return;
-      }
-      const order = activeOrders[0];
-      const part = activeParts[0];
-
+      if (!activeOrder || !activeOrderPart) return;
       setIsPrintingBoxLabel(true);
       showLoading("Buscando configuración de etiqueta de caja...");
       try {
           // Buscar configuración BOX_LABEL para el SKU
           const configs = await db.getLabelConfigs();
-          const boxLabelConfig = configs.find(c => c.sku === part.productCode && c.labelType === 'BOX_LABEL');
+          const boxLabelConfig = configs.find(c => c.sku === activeOrderPart.productCode && c.labelType === 'BOX_LABEL');
           if (!boxLabelConfig) {
               showAlert("Sin Configuración", "No tiene etiqueta de caja configurada.", "warning");
               return;
           }
           // Imprimir etiqueta de caja
-          await db.printLabel(order.orderNumber, part.partNumber, {
-              sku: part.productCode,
+          await db.printLabel(activeOrder.orderNumber, activeOrderPart.partNumber, {
+              sku: activeOrderPart.productCode,
               quantity: 1,
-              jobDescription: `Box Label ${order.orderNumber}`,
-              labelType: 'BOX_LABEL',
-              excludeLabelTypes: ['NAMEPLATE', 'CARTON1', 'CARTON2']
+              jobDescription: `Box Label ${activeOrder.orderNumber}`,
+              labelType: 'BOX_LABEL'
           });
           showAlert("Éxito", "Etiqueta de caja enviada correctamente.", "success");
       } catch (e: any) {
@@ -1019,79 +903,38 @@ function StationInterface({ operation, route, onBack, user }: StationProps) {
       }
   };
 
-  // --- FINAL STATION COMPLETION UI STATE ---
-  const [showLotReprintModal, setShowLotReprintModal] = useState(false);
-  const [showAccessoryReprintModal, setShowAccessoryReprintModal] = useState(false);
-  const [lotReprintSuffix, setLotReprintSuffix] = useState('');
-  const [accessoryReprintQty, setAccessoryReprintQty] = useState(1);
-  const [labelConfigs, setLabelConfigs] = useState<any[]>([]);
-  const [selectedLabelConfig, setSelectedLabelConfig] = useState<any>(null);
-
-  // Estado para mostrar el detalle de la unidad seleccionada
-  const [selectedSerialDetail, setSelectedSerialDetail] = useState<SerialUnit | null>(null);
-
-  // --- CARGA DE CONFIGURACIONES DE ETIQUETA PARA REIMPRESIÓN ---
-  const fetchLabelConfigs = async () => {
-    if (!activeParts || activeParts.length !== 1) return;
-    const part = activeParts[0];
-    showLoading("Cargando configuraciones...");
-    try {
-      const configs = await db.getLabelConfigs();
-      const partConfigs = configs.filter(c => c.sku === part.productCode && c.labelType !== 'BOX_LABEL' && c.labelType !== 'NAMEPLATE');
-      setLabelConfigs(partConfigs);
-      if (partConfigs.length === 1) {
-        setSelectedLabelConfig(partConfigs[0]);
+  const handleFinishOrder = async () => {
+      if (!activeOrder) return;
+      const confirmed = await showConfirm("Finalizar Orden", "¿Está seguro de que desea cerrar esta orden? No se podrán procesar más unidades.");
+      if (!confirmed) return;
+      
+      showLoading("Cerrando Orden...");
+      try {
+          // @ts-ignore
+          await db.updateOrder({ ...activeOrder, status: 'CLOSED' });
+          showAlert("Éxito", "Orden finalizada correctamente.", "success");
+          handleChangeContext();
+      } catch (e: any) {
+          showAlert("Error", "No se pudo cerrar la orden: " + e.message, "error");
+      } finally {
+          hideLoading();
       }
-    } catch(e) {
-      showAlert("Error", "No se pudieron cargar las configuraciones de etiquetas.", "error");
-    } finally {
-      hideLoading();
-    }
   };
 
-  // --- PROGRESO POR ESTACIÓN ---
-  const getStationProgress = (order: WorkOrder) => {
-    const serialsForOrder = allOrderSerials.filter(s => s.orderNumber === order.orderNumber);
-    const completedInThisStation = serialsForOrder.filter(s => {
-      if (!s.history || s.history.length === 0) return false;
-      return s.history.some(h => h.operationId === operation.id);
-    }).length;
-    return { completedInThisStation, total: order.quantity };
-  };
+  const isOrderComplete = activeOrder && scannedCount >= activeOrder.quantity;
+  const isLotBased = activeOrderPart?.serialGenType === 'LOT_BASED';
 
-  // --- Auto-close order on completion SOLO EN ESTACIÓN FINAL ---
-  const showCompletionUI = activeOrders ? activeOrders.every(order => {
-    const { completedInThisStation, total } = getStationProgress(order);
-    return completedInThisStation >= total;
-  }) : false;
+  // Calcula progreso de la estación activa (para la barra superior)
+  function getCurrentStationProgress(serials: SerialUnit[], currentOpId: string): { completed: number, total: number } {
+      if (!activeOrder) return { completed: 0, total: 0 };
+      const total = activeOrder.quantity;
+      if (!currentOpId || !serials) return { completed: 0, total };
+      const completed = serials.filter(s => s.history && s.history.some(h => h.operationId === currentOpId)).length;
+      return { completed, total };
+  }
 
-  useEffect(() => {
-    const isPcb = activeParts.some(p => p.serialGenType === 'PCB_SERIAL');
-    if (showCompletionUI && activeOrders && activeOrders.some(o => o.status !== 'CLOSED') && operation.isFinal && !isPcb) {
-      const closeOrders = async () => {
-        try {
-          showAlert("Orden(es) Completa(s)", "Las órdenes se cerrarán automáticamente.", "info");
-          const updatedOrders = await Promise.all(activeOrders.map(async (order) => {
-            const { completedInThisStation, total } = getStationProgress(order);
-            if (order.status !== 'CLOSED' && completedInThisStation >= total) {
-              const updatedOrder = { ...order, status: 'CLOSED' as 'CLOSED' };
-              // @ts-ignore
-              await db.updateOrder(updatedOrder);
-              return updatedOrder;
-            }
-            return order;
-          }));
-          setActiveOrders(updatedOrders);
-        } catch (e: any) {
-          showAlert("Error de Cierre", "No se pudieron cerrar las órdenes automáticamente: " + e.message, "error");
-        }
-      };
-      const timer = setTimeout(() => {
-        closeOrders();
-      }, 1500);
-      return () => clearTimeout(timer);
-    }
-  }, [showCompletionUI, activeOrders, operation.id]);
+  const stationProgress = getCurrentStationProgress(allOrderSerials, operation.id);
+  const isStationComplete = activeOrder && stationProgress.completed >= activeOrder.quantity;
 
   // --- RENDER ---
   return (
@@ -1124,7 +967,7 @@ function StationInterface({ operation, route, onBack, user }: StationProps) {
         <div className="bg-white p-8 rounded-2xl shadow-lg flex flex-col justify-center items-center border border-blue-50 relative overflow-hidden">
           <div className="w-full max-w-md z-10">
             
-            {operation.isInitial && !activeOrders ? (
+            {operation.isInitial && !activeOrder ? (
                 <div className="w-full animate-in fade-in zoom-in duration-300">
                     <h3 className="text-lg font-bold text-slate-700 mb-6 flex items-center justify-center"><PlayCircle className="mr-2 text-blue-600"/> Setup de Orden</h3>
                     <div className={`mb-4 transition-opacity ${setupStep === 1 ? 'opacity-100' : 'opacity-50'}`}>
@@ -1163,7 +1006,7 @@ function StationInterface({ operation, route, onBack, user }: StationProps) {
                         <input ref={modelRef} value={modelInput} onChange={e => setModelInput(e.target.value)} disabled={setupStep !== 3} className="w-full px-4 py-3 border-2 border-slate-300 rounded-lg focus:border-blue-500 text-lg uppercase" placeholder="Ej. LT-SEN-R3"/>
                     </div>
                 </div>
-            ) : !activeOrders ? (
+            ) : !activeOrder ? (
                 <div className="w-full animate-in fade-in zoom-in duration-300">
                      <h3 className="text-lg font-bold text-slate-700 mb-6 flex items-center justify-center"><RefreshCw className="mr-2 text-blue-600"/> Resumir Trabajo</h3>
                      <form onSubmit={handleScanContext}>
@@ -1180,376 +1023,444 @@ function StationInterface({ operation, route, onBack, user }: StationProps) {
                 <div className="w-full animate-in fade-in zoom-in duration-300">
                     <div className="flex justify-between items-baseline mb-2">
                         <label className="block text-sm font-bold text-slate-600 uppercase tracking-wider">
-                            {(() => {
-                                const hasPcb = activeParts.some(p => p.serialGenType === 'PCB_SERIAL');
-                                const hasLot = activeParts.some(p => p.serialGenType === 'LOT_BASED');
-                                const hasAcc = activeParts.some(p => p.serialGenType === 'ACCESSORIES');
-                                if (hasLot && !hasPcb && !hasAcc) return "Escaneo por Charola";
-                                if (hasAcc && !hasPcb && !hasLot) return "Accesorios (Lotes)";
-                                return "Escanear Serial o Charola";
-                            })()}
+                            {isLotBased ? "Escaneo por Charola" : activeOrderPart?.serialGenType === 'ACCESSORIES' ? "Accesorios (Lotes)" : "Escanear Serial"}
                         </label>
-                        {activeOrders && activeOrders.length === 1 && <span className="text-xs bg-blue-100 text-blue-800 px-2 py-1 rounded font-mono">Lote: {activeOrders[0].orderNumber}</span>}
+                        {activeOrder && <span className="text-xs bg-blue-100 text-blue-800 px-2 py-1 rounded font-mono">Lote: {activeOrder.orderNumber}</span>}
                     </div>
 
-                    {showCompletionUI ? (
-                        <div className="bg-blue-50 border border-blue-200 rounded-xl p-6 text-center">
-                            <CheckCircle className="mx-auto text-green-500 mb-3" size={32}/>
-                            <h4 className="text-lg font-bold text-blue-800 mb-2">Orden(es) Completada(s)</h4>
-                            <p className="text-sm text-slate-600 mb-4">Todas las unidades han sido procesadas.</p>
-                            
-                             <div className="grid grid-cols-1 gap-3 mt-4">
-                                {operation.isFinal ? (<>
-                                    {activeParts.every(p => p.serialGenType === 'LOT_BASED') && (
-                                        <button onClick={async () => { await fetchLabelConfigs(); setShowLotReprintModal(true); }} className="px-4 py-3 bg-white border border-slate-300 rounded-lg text-slate-700 font-bold hover:bg-slate-50 flex items-center justify-center shadow-sm"><Printer size={16} className="mr-2"/> Reimprimir Etiqueta</button>
-                                    )}
-                                    {activeParts.every(p => p.serialGenType === 'ACCESSORIES') && (
-                                        <button onClick={async () => { await fetchLabelConfigs(); setShowAccessoryReprintModal(true); }} className="px-4 py-3 bg-white border border-slate-300 rounded-lg text-slate-700 font-bold hover:bg-slate-50 flex items-center justify-center shadow-sm"><Printer size={16} className="mr-2"/> Reimprimir</button>
-                                    )}
-                                    
-                                    {!activeParts.every(p => p.serialGenType === 'LOT_BASED' || p.serialGenType === 'ACCESSORIES') && (
-                                         <p className="text-sm text-slate-500 mb-2 text-center">Haga clic en un número de serie en la lista para reimprimir etiquetas.</p>
-                                    )}
-                                    
-                                    <button onClick={() => { if (activeParts.length === 1) handlePrintBoxLabel(); }} disabled={isPrintingBoxLabel || activeParts.length > 1} className="px-4 py-3 bg-white border border-slate-300 rounded-lg text-slate-700 font-bold hover:bg-slate-50 flex items-center justify-center shadow-sm disabled:opacity-50"><Box size={16} className="mr-2"/> Imprimir Etiqueta de Caja</button>
-                                    
-                                    {!activeParts.every(p => p.serialGenType === 'LOT_BASED' || p.serialGenType === 'ACCESSORIES') ? (
-                                        <button onClick={finishAndCloseOrder} className="px-4 py-3 bg-blue-600 text-white rounded-lg font-bold hover:bg-blue-700 shadow-lg flex items-center justify-center"><CheckCircle size={16} className="mr-2"/> Finalizar (Cerrar Orden)</button>
+                    {operation.isInitial && isOrderComplete ? (
+                         <div className="bg-blue-50 border border-blue-200 rounded-xl p-6 text-center">
+                             <CheckCircle className="mx-auto text-green-500 mb-3" size={32}/>
+                             <h4 className="text-lg font-bold text-blue-800 mb-2">Orden Completada en esta Estación</h4>
+                             <p className="text-sm text-slate-600 mb-4">Todas las unidades ({scannedCount}) han sido procesadas.</p>
+                             
+                             <div className="grid grid-cols-2 gap-3">
+                                {activeOrderPart?.serialGenType !== 'LOT_BASED' && (
+                                  <button onClick={() => setIsReprinting(true)} className="px-4 py-2 bg-white border border-slate-300 rounded-lg text-slate-700 font-bold hover:bg-slate-50 flex items-center justify-center">
+                                      <Printer size={16} className="mr-2"/> Re-Imprimir
+                                  </button>
+                                )}
+                                <button onClick={() => { setActiveOrder(null); setSapOrderInput(''); setQtyInput(''); setModelInput(''); setSetupStep(1); }} className={`px-4 py-2 bg-blue-600 text-white rounded-lg font-bold hover:bg-blue-700 shadow flex items-center justify-center ${activeOrderPart?.serialGenType === 'LOT_BASED' ? 'col-span-2' : ''}`}>
+                                    <LogOut size={16} className="mr-2"/> Cerrar Orden
+                                </button>
+                             </div>
+                         </div>
+                    ) : (
+                        isLotBased ? (
+                            operation.isInitial ? (
+                                <div className="space-y-4">
+                                    {!trayGenerated ? (
+                                        <form onSubmit={handleScanTrayInitial}>
+                                            <div className="relative group">
+                                                <Layers className="absolute left-4 top-3.5 text-slate-400" />
+                                                <input autoFocus value={trayInput} onChange={e => setTrayInput(e.target.value)} className="w-full pl-12 pr-4 py-3 text-lg border-2 border-slate-300 rounded-xl focus:border-blue-500 outline-none transition-all font-mono" placeholder="Escanear Charola (Tray ID)"/>
+                                            </div>
+                                            <p className="text-xs text-slate-400 mt-2 text-center">Escanea la charola para generar lotes (Max 100/Tray).</p>
+                                        </form>
                                     ) : (
-                                        <button onClick={closeOrderAndReset} className="px-4 py-3 bg-blue-600 text-white rounded-lg font-bold hover:bg-blue-700 shadow-lg flex items-center justify-center"><LogOut size={16} className="mr-2"/> Finalizar (Cerrar Orden)</button>
-                                    )}
-                                </>) : (<>
-                                    {/* --- BOTONES PARA ESTACIÓN INICIAL --- */}
-                                    {!activeParts.every(p => p.serialGenType === 'LOT_BASED' || p.serialGenType === 'ACCESSORIES') ? (
-                                        <div className="w-full">
-                                            <p className="text-slate-600 font-medium mb-2 text-center">Orden completada en esta estación.</p>
-                                            <p className="text-sm text-slate-500 mb-4 text-center">Haga clic en un número de serie en la lista para reimprimir etiquetas.</p>
-                                            <button onClick={closeOrderAndReset} className="w-full px-4 py-3 bg-blue-600 text-white rounded-lg font-bold hover:bg-blue-700 shadow flex items-center justify-center">
-                                                <LogOut size={16} className="mr-2"/> Cerrar Orden
-                                            </button>
+                                        <div className="text-center bg-green-50 p-6 rounded-xl border border-green-100 animate-in fade-in slide-in-from-bottom-2">
+                                            <CheckCircle size={40} className="text-green-500 mx-auto mb-2"/>
+                                            <p className="font-bold text-green-800 mb-4 uppercase tracking-wide">Charola Generada</p>
+                                            <div className="grid grid-cols-1 gap-3">
+                                                <button onClick={handleDownloadCsvAgain} className="w-full py-3 bg-white border-2 border-blue-200 text-blue-700 rounded-lg font-bold shadow-sm hover:bg-blue-50 flex items-center justify-center transition-colors">
+                                                    <Download size={18} className="mr-2"/> Descargar CSV Nuevamente
+                                                </button>
+                                                <button onClick={handleFinishTrayInitial} className="w-full py-3 bg-green-600 text-white rounded-lg font-bold shadow-lg hover:bg-green-700 flex items-center justify-center transition-colors">
+                                                    <CheckCircle size={18} className="mr-2"/> Confirmar y Liberar Charola
+                                                </button>
+                                            </div>
                                         </div>
-                                    ) : (
-                                        <>
-                                            {activeParts.every(p => p.serialGenType !== 'LOT_BASED') && (
-                                                <button onClick={() => setIsReprinting(true)} className="px-4 py-2 bg-white border border-slate-300 rounded-lg text-slate-700 font-bold hover:bg-slate-50 flex items-center justify-center">
-                                                    <Printer size={16} className="mr-2"/> Re-Imprimir
+                                    )
+                                }
+                                </div>
+                            ) : (
+                                activeTrayId ? (
+                                    <div className="text-center">
+                                        <div className="flex justify-between items-center mb-2">
+                                            <h4 className="font-bold text-lg">Charola: {activeTrayId}</h4>
+                                            {!operation.isFinal && !trayIsFinished && (
+                                                <button onClick={handleSelectAllTray} className="text-xs flex items-center bg-blue-50 text-blue-600 px-3 py-1 rounded hover:bg-blue-100 border border-blue-200 font-bold">
+                                                    {selectAll ? <CheckSquare size={14} className="mr-1"/> : <Square size={14} className="mr-1"/>}
+                                                    Marcar Todo PASS
                                                 </button>
                                             )}
-                                            <button onClick={closeOrderAndReset} className={`px-4 py-2 bg-blue-600 text-white rounded-lg font-bold hover:bg-blue-700 shadow flex items-center justify-center`}>
-                                                <LogOut size={16} className="mr-2"/> Cerrar Orden
-                                            </button>
-                                        </>
-                                    )}
-                                </>)}
-                            </div>
-                        </div>
-                    ) : (
-                        (() => {
-                            const isLotBasedOnly = activeParts.every(p => p.serialGenType === 'LOT_BASED') && activeParts.length > 0;
-                            const isAccessoriesOnly = activeParts.every(p => p.serialGenType === 'ACCESSORIES') && activeParts.length > 0;
-
-                            if (isLotBasedOnly) {
-                                return operation.isInitial ? (
-                                    <div className="space-y-4">
-                                        {!trayGenerated ? (
-                                            <form onSubmit={handleScanTrayInitial}>
-                                                <div className="relative group">
-                                                    <Layers className="absolute left-4 top-3.5 text-slate-400" />
-                                                    <input autoFocus value={trayInput} onChange={e => setTrayInput(e.target.value)} className="w-full pl-12 pr-4 py-3 text-lg border-2 border-slate-300 rounded-xl focus:border-blue-500 outline-none transition-all font-mono" placeholder="Escanear Charola (Tray ID)"/>
-                                                </div>
-                                                <p className="text-xs text-slate-400 mt-2 text-center">Escanea la charola para generar lotes (Max 100/Tray).</p>
-                                            </form>
+                                        </div>
+                                        <div className="grid grid-cols-10 gap-1 mb-4 max-h-[300px] overflow-y-auto p-2 bg-slate-50 rounded border">
+                                            {traySerials.map((s, idx) => {
+                                                const processed = s.isComplete || s.history.some(h => h.operationId === operation.id);
+                                                return (
+                                                    <div 
+                                                        key={idx} 
+                                                        onClick={() => !operation.isFinal && !trayIsFinished && handleToggleTrayUnit(s)}
+                                                        className={`w-6 h-6 text-[8px] flex items-center justify-center rounded cursor-pointer border ${processed ? 'bg-green-500 text-white border-green-600' : 'bg-gray-200 text-gray-500 border-gray-300 hover:bg-gray-300'}`}
+                                                        title={s.serialNumber}
+                                                    >
+                                                        {idx + 1}
+                                                    </div>
+                                                )
+                                            })}
+                                        </div>
+                                        {operation.isFinal ? (
+                                            trayIsFinished ? (
+                                                <button onClick={() => setIsSuffixReprinting(true)} className="w-full py-3 bg-blue-600 text-white rounded-lg font-bold shadow hover:bg-blue-700 flex items-center justify-center">
+                                                    <Printer className="mr-2"/> Re-imprimir Etiqueta
+                                                </button>
+                                            ) : (
+                                                <button onClick={handleProcessTrayFinal} className="w-full py-3 bg-slate-900 text-white rounded-lg font-bold shadow-lg hover:bg-slate-800 flex items-center justify-center">
+                                                    <Printer className="mr-2"/> Procesar Charola e Imprimir
+                                                </button>
+                                            )
                                         ) : (
-                                            <div className="text-center bg-green-50 p-6 rounded-xl border border-green-100 animate-in fade-in slide-in-from-bottom-2">
-                                                <CheckCircle size={40} className="text-green-500 mx-auto mb-2"/>
-                                                <p className="font-bold text-green-800 mb-4 uppercase tracking-wide">Charola Generada</p>
-                                                <div className="grid grid-cols-1 gap-3">
-                                                    <button onClick={handleDownloadCsvAgain} className="w-full py-3 bg-white border-2 border-blue-200 text-blue-700 rounded-lg font-bold shadow-sm hover:bg-blue-50 flex items-center justify-center transition-colors">
-                                                        <Download size={18} className="mr-2"/> Descargar CSV Nuevamente
-                                                    </button>
-                                                    <button onClick={handleFinishTrayInitial} className="w-full py-3 bg-green-600 text-white rounded-lg font-bold shadow-lg hover:bg-green-700 flex items-center justify-center transition-colors">
-                                                        <CheckCircle size={18} className="mr-2"/> Confirmar y Liberar Charola
-                                                    </button>
-                                                </div>
+                                            <div className="flex gap-2">
+                                                 <button onClick={() => { setActiveTrayId(null); setTraySerials([]); setSelectAll(false); setTrayIsFinished(false); }} className="flex-1 py-2 border border-slate-300 rounded-lg text-slate-600 hover:bg-slate-50">Cancelar</button>
+                                                 <button 
+                                                    onClick={handleFinishTrayProcessing} 
+                                                    disabled={!trayIsFinished && traySerials.filter(s => s.history.some(h => h.operationId === operation.id)).length < traySerials.length}
+                                                    className="flex-1 py-2 bg-green-600 text-white rounded-lg font-bold shadow disabled:opacity-50 disabled:cursor-not-allowed hover:bg-green-700"
+                                                 >
+                                                     {trayIsFinished ? "Cerrar Vista" : "Terminar / Siguiente"}
+                                                 </button>
                                             </div>
-                                        )
-                                    }
+                                        )}
                                     </div>
                                 ) : (
-                                    activeTrayId ? (
-                                        <div className="text-center">
-                                          {/* ... TRAY UI ... */}
+                                    <form onSubmit={handleScanTrayProcessing}>
+                                        <div className="relative group">
+                                            <Layers className="absolute left-4 top-3.5 text-slate-400" />
+                                            <input autoFocus value={trayInput} onChange={e => setTrayInput(e.target.value)} className="w-full pl-12 pr-4 py-3 text-lg border-2 border-slate-300 rounded-xl focus:border-blue-500 outline-none transition-all font-mono" placeholder="Escanear Charola para Procesar"/>
                                         </div>
-                                    ) : (
-                                        <form onSubmit={handleScanTrayProcessing}>
-                                          <div className="relative group">
-                                              <Layers className="absolute left-4 top-3.5 text-slate-400" />
-                                              <input autoFocus value={trayInput} onChange={e => setTrayInput(e.target.value)} className="w-full pl-12 pr-4 py-3 text-lg border-2 border-slate-300 rounded-xl focus:border-blue-500 outline-none transition-all font-mono" placeholder="Escanear Charola para Procesar"/>
-                                          </div>
-                                        </form>
-                                    )
-                                );
-                            }
-                            
-                            if (isAccessoriesOnly) {
-                              return (
-                                  <div className="text-center p-8 bg-slate-50 rounded-xl border border-slate-200">
-                                      <h4 className="font-bold text-slate-700 text-lg">Lote de Accesorios Generado</h4>
-                                      <div className="grid grid-cols-2 gap-4 mt-6">
-                                          <button onClick={() => setIsReprinting(true)} className="flex items-center justify-center px-4 py-3 bg-white border border-slate-300 text-slate-700 rounded-lg hover:bg-slate-100 transition-colors font-semibold shadow-sm"><Printer size={16} className="mr-2"/> Re-Impresión</button>
-                                          <button onClick={handleFinishAccessories} className="flex items-center justify-center px-4 py-3 bg-slate-900 text-white rounded-lg hover:bg-slate-800 transition-colors font-bold shadow-lg"><CheckCircle size={16} className="mr-2"/> Finalizar</button>
-                                      </div>
-                                  </div>
-                              );
-                            }
-
-                            // Default/mixed view
-                            return (
+                                    </form>
+                                )
+                            )
+                        ) : activeOrderPart?.serialGenType === 'ACCESSORIES' ? (
+                            <div className="text-center p-8 bg-slate-50 rounded-xl border border-slate-200">
+                                <h4 className="font-bold text-slate-700 text-lg">Lote de Accesorios Generado</h4>
+                                <div className="grid grid-cols-2 gap-4 mt-6">
+                                    <button onClick={() => setIsReprinting(true)} className="flex items-center justify-center px-4 py-3 bg-white border border-slate-300 text-slate-700 rounded-lg hover:bg-slate-100 transition-colors font-semibold shadow-sm"><Printer size={16} className="mr-2"/> Re-Impresión</button>
+                                    <button onClick={handleFinishAccessories} className="flex items-center justify-center px-4 py-3 bg-slate-900 text-white rounded-lg hover:bg-slate-800 transition-colors font-bold shadow-lg"><CheckCircle size={16} className="mr-2"/> Finalizar</button>
+                                </div>
+                            </div>
+                        ) : (
+                            isStationComplete ? (
+                                <div className="flex flex-col items-center justify-center p-6 bg-green-50 rounded-xl border border-green-100">
+                                    <CheckCircle size={48} className="text-green-500 mb-4" />
+                                    <h3 className="text-xl font-bold text-green-800 mb-2">Estación Completada</h3>
+                                    <p className="text-slate-600 mb-6 text-center">Se han procesado todas las unidades ({stationProgress.completed}/{stationProgress.total}).</p>
+                                    
+                                    {operation.isFinal && (
+                                        <div className="grid grid-cols-1 gap-3 w-full max-w-xs">
+                                            <button onClick={handlePrintBoxLabel} disabled={isPrintingBoxLabel} className="flex items-center justify-center px-4 py-3 bg-white border border-slate-300 text-slate-700 rounded-lg hover:bg-slate-50 font-bold shadow-sm disabled:opacity-50">
+                                                <Box size={20} className="mr-2"/> Imprimir Etiqueta de Caja
+                                            </button>
+                                            <button onClick={handleFinishOrder} className="flex items-center justify-center px-4 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-bold shadow-lg">
+                                                <LogOut size={20} className="mr-2"/> Finalizar Orden
+                                            </button>
+                                        </div>
+                                    )}
+                                </div>
+                            ) : (
                                 <div className="relative group">
                                     <Scan className="absolute left-4 top-3.5 text-slate-400" />
                                     <input ref={inputRef} autoFocus value={serialInput} onChange={e => setSerialInput(e.target.value)} className="w-full pl-12 pr-4 py-3 text-lg border-2 border-slate-300 rounded-xl focus:border-blue-500 outline-none transition-all font-mono" placeholder="Escanear Serial..."/>
                                 </div>
-                            );
-                        })()
+                            )
+                        )
                     )}
-                  </div>
-              )}
-              
-              {statusMsg && (
-                  <div className={`mt-6 w-full p-3 rounded-lg flex items-center justify-center shadow-sm animate-in fade-in ${statusMsg.type === 'success' ? 'bg-green-100 text-green-700 border border-green-200' : statusMsg.type === 'error' ? 'bg-red-100 text-red-700 border border-red-200' : 'bg-blue-100 text-blue-700 border border-blue-200'}`}>
-                    <span className="font-bold">{statusMsg.text}</span>
-                  </div>
-              )}
-            </div>
-          </div>
-
-          {/* INFO SIDEBAR */}
-          <div className="flex flex-col gap-4 h-full">
-               {activeOrders && activeOrders.length > 0 && activeParts.length > 0 ? (
-                   <>
-                      {/* --- Detalle de la Orden --- */}
-                      <div className="bg-white rounded-xl shadow p-4 border border-slate-100 flex flex-col gap-2 mb-2">
-                        <div className="flex justify-between items-center mb-2">
-                          <div>
-                            <div className="text-xs text-slate-400 font-bold uppercase tracking-wider">ORDEN SAP</div>
-                            <div className="font-bold text-slate-800 text-lg">{activeOrders[0].sapOrderNumber}</div>
-                          </div>
-                          <div className="flex flex-col items-end">
-                            <span className="text-xs text-slate-400 font-bold uppercase tracking-wider">PROGRESO</span>
-                            <span className="font-bold text-blue-700 text-lg">{getStationProgress(activeOrders[0]).completedInThisStation} / {getStationProgress(activeOrders[0]).total}</span>
-                          </div>
-                        </div>
-                        <div className="flex gap-4 text-sm">
-                          <div><span className="text-slate-400 font-bold">Lote:</span> <span className="font-mono font-bold">{activeOrders[0].orderNumber}</span></div>
-                          <div><span className="text-slate-400 font-bold">Modelo:</span> <span className="font-mono font-bold">{activeParts[0].productCode}</span></div>
-                          <div><span className="text-slate-400 font-bold">Tipo Serial:</span> <span className="font-mono font-bold">{activeParts[0].serialGenType}</span></div>
-                        </div>
-                        {/* Barra de progreso visual */}
-                        <div className="w-full h-2 bg-slate-100 rounded mt-2">
-                          <div style={{width: `${(getStationProgress(activeOrders[0]).completedInThisStation/getStationProgress(activeOrders[0]).total)*100}%`}} className="h-2 bg-blue-500 rounded transition-all"></div>
-                        </div>
-                      </div>
-
-                      {/* --- Tabla de Unidades Procesadas --- */}
-                      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm flex-1 overflow-hidden flex flex-col">
-                          <div className="p-4 border-b border-slate-100 bg-slate-50 font-bold text-slate-700 text-sm flex items-center">
-                              <List size={16} className="mr-2 text-slate-400"/>
-                              Unidades Procesadas
-                          </div>
-                          <div className="overflow-y-auto p-4 flex-1">
-                            <table className="w-full text-sm">
-                              <thead>
-                                <tr className="text-slate-500 text-xs border-b">
-                                  <th className="text-left py-1">SERIAL</th>
-                                  <th className="text-left py-1">PRUEBA FUNCIONAL</th>
-                                  <th className="text-left py-1">FIRMWARE VERSION</th>
-                                  <th className="text-left py-1">Estado</th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {allOrderSerials.filter(s => s.orderNumber === activeOrders[0].orderNumber).map(s => (
-                                  <tr key={s.serialNumber} className="border-b last:border-b-0">
-                                    <td className="font-mono text-blue-700 underline cursor-pointer" onClick={() => setSelectedSerialDetail(s)}>{s.serialNumber}</td>
-                                    <td>{s.testFechaRegistro ? new Date(s.testFechaRegistro).toLocaleString() : '-'}</td>
-                                    <td>{s.testSensorFW || '-'}</td>
-                                    <td>{s.isComplete ? <span className="text-green-600 font-bold">✔</span> : <span className="text-slate-400">...</span>}</td>
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          </div>
-                      </div>
-
-                      <button onClick={handleChangeContext} className="mt-4 w-full flex items-center justify-center text-xs text-red-500 border border-red-200 p-2 rounded hover:bg-red-50 relative">
-                          <LogOut size={12} className="mr-1"/> Cerrar Contexto
-                      </button>
-                   </>
-               ) : (
-                   <div className="bg-slate-50 border border-dashed border-slate-300 p-8 rounded-2xl text-center text-slate-400 my-auto">
-                       <Info className="mx-auto mb-2 opacity-50"/>
-                       <p>Escanee una Orden SAP para activar el contexto de trabajo.</p>
-                   </div>
-               )}
+                </div>
+            )}
+            
+            {statusMsg && (
+                <div className={`mt-6 w-full p-3 rounded-lg flex items-center justify-center shadow-sm animate-in fade-in ${statusMsg.type === 'success' ? 'bg-green-100 text-green-700 border border-green-200' : statusMsg.type === 'error' ? 'bg-red-100 text-red-700 border border-red-200' : 'bg-blue-100 text-blue-700 border border-blue-200'}`}>
+                  <span className="font-bold">{statusMsg.text}</span>
+                </div>
+            )}
           </div>
         </div>
 
-        {isReprinting && (
-          <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 backdrop-blur-sm">
-              <div className="bg-white p-6 rounded-2xl shadow-xl w-full max-w-sm animate-in zoom-in-95">
-                  <h3 className="text-lg font-bold mb-4 flex items-center"><Printer className="mr-2"/> Re-Impresión</h3>
-                  <input type="number" className="w-full p-3 border rounded-lg text-lg mb-4 text-center font-bold" value={reprintQty} onChange={e => setReprintQty(Number(e.target.value))} min={1} />
-                  <div className="flex gap-2 justify-end">
-                    <button className="px-4 py-2 rounded-lg bg-slate-200 text-slate-700 font-bold hover:bg-slate-300" onClick={() => { setIsReprinting(false); setReprintQty(1); }}>Cancelar</button>
-                    <button className="px-4 py-2 rounded-lg bg-blue-600 text-white font-bold hover:bg-blue-700" onClick={async () => { await handleReprint(); }} disabled={reprintQty < 1}>Reimprimir</button>
-                  </div>
-              </div>
-          </div>
-        )}
+        {/* INFO SIDEBAR */}
+        <div className="flex flex-col gap-4">
+             {activeOrder ? (
+                 <>
+                    <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm relative overflow-hidden">
+                        <div className="flex justify-between items-start mb-4 relative z-10">
+                            <div><p className="text-xs text-slate-400 font-bold uppercase">Orden SAP</p><p className="text-xl font-mono font-bold text-slate-800">{activeOrder.sapOrderNumber || 'N/A'}</p></div>
+                            <div className="text-right"><p className="text-xs text-slate-400 font-bold uppercase">Progreso</p><p className="text-xl font-bold text-blue-600">{stationProgress.completed} / {stationProgress.total}</p></div>
+                        </div>
+                        <div className="w-full bg-slate-100 rounded-full h-2 mb-4 relative z-10"><div className="bg-blue-600 h-2 rounded-full transition-all duration-500" style={{width: `${stationProgress.total > 0 ? Math.min((stationProgress.completed/stationProgress.total)*100, 100) : 0}%`}}></div></div>
+                        <div className="p-3 bg-slate-50 rounded-lg border border-slate-100 text-sm space-y-2 relative z-10">
+                            <div className="flex justify-between"><span className="text-slate-500">Modelo:</span><span className="font-medium">{activeOrderPart?.productCode}</span></div>
+                            <div className="flex justify-between"><span className="text-slate-500">Tipo Serial:</span><span className="font-mono text-xs bg-slate-200 px-1 rounded">{activeOrderPart?.serialGenType}</span></div>
+                        </div>
+                        
+                        <button onClick={handleChangeContext} className="mt-4 w-full flex items-center justify-center text-xs text-red-500 border border-red-200 p-2 rounded hover:bg-red-50 relative z-10">
+                            <LogOut size={12} className="mr-1"/> Cerrar Orden / Cambiar
+                        </button>
+                    </div>
 
-        {isSuffixReprinting && (
-          <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 backdrop-blur-sm">
-               <div className="bg-white p-6 rounded-2xl shadow-xl w-full max-w-sm animate-in zoom-in-95">
-                  <h3 className="text-lg font-bold mb-4 flex items-center"><Printer className="mr-2 text-purple-600"/> Re-imprimir Serial</h3>
-                  <p className="text-sm text-slate-500 mb-3 text-center">Ingrese los últimos 3 dígitos del serial a reimprimir (Ej. 003)</p>
-                  <div className="relative mb-4">
-                      <Hash className="absolute left-3 top-3 text-slate-400" size={20} />
-                      <input 
-                          type="text" 
-                          maxLength={3}
-                          autoFocus
-                          className="w-full pl-10 pr-4 p-3 border rounded-lg text-xl font-mono text-center font-bold tracking-widest uppercase" 
-                          value={reprintSuffix} 
-                          onChange={e => setReprintSuffix(e.target.value.replace(/[^0-9]/g, '').slice(0, 3))} 
-                          placeholder="000"
-                      />
-                  </div>
-                  <div className="flex gap-2 justify-end">
-                    <button className="px-4 py-2 rounded-lg bg-slate-200 text-slate-700 font-bold hover:bg-slate-300" onClick={() => { setIsSuffixReprinting(false); setReprintSuffix(''); }}>Cancelar</button>
-                    <button className="px-4 py-2 rounded-lg bg-purple-600 text-white font-bold hover:bg-purple-700" onClick={async () => { await handleReprintSuffix(); }} disabled={reprintSuffix.length !== 3}>Reimprimir</button>
-                  </div>
-               </div>
-          </div>
-        )}
-
-      {showLotReprintModal && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 backdrop-blur-sm">
-          <div className="bg-white p-6 rounded-2xl shadow-xl w-full max-w-md animate-in zoom-in-95">
-            <h3 className="text-lg font-bold mb-4 flex items-center"><Printer className="mr-2 text-purple-600"/> Reimprimir Etiqueta de Lote</h3>
-            <input
-              type="text"
-              maxLength={3}
-              autoFocus
-              className="w-full p-3 border rounded-lg text-xl font-mono text-center font-bold tracking-widest uppercase mb-4"
-              value={lotReprintSuffix}
-              onChange={e => setLotReprintSuffix(e.target.value.replace(/[^0-9]/g, '').slice(0, 3))}
-              placeholder="000"
-            />
-            <div className="flex gap-2 justify-end">
-              <button className="px-4 py-2 rounded-lg bg-slate-200 text-slate-700 font-bold hover:bg-slate-300" onClick={() => { setShowLotReprintModal(false); setLotReprintSuffix(''); }}>Cancelar</button>
-              <button className="px-4 py-2 rounded-lg bg-purple-600 text-white font-bold hover:bg-purple-700" onClick={async () => { await handleLotReprint(); setShowLotReprintModal(false); setLotReprintSuffix(''); }} disabled={lotReprintSuffix.length !== 3}>Reimprimir</button>
-            </div>
-          </div>
+                    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm flex-1 overflow-hidden flex flex-col">
+                        <div className="p-4 border-b border-slate-100 bg-slate-50 font-bold text-slate-700 text-sm flex items-center">
+                            <List size={16} className="mr-2 text-slate-400"/>
+                            {isLotBased ? "Progreso por Charola" : "Unidades Procesadas"}
+                        </div>
+                        <div className="overflow-y-auto p-4 space-y-3 flex-1">
+                            {isLotBased ? (
+                                <TrayProgressSummary serials={allOrderSerials} allOps={allOps} />
+                            ) : (
+                                <SerialProgressList serials={allOrderSerials} />
+                            )}
+                        </div>
+                    </div>
+                 </>
+             ) : (
+                 <div className="bg-slate-50 border border-dashed border-slate-300 p-8 rounded-2xl text-center text-slate-400">
+                     <Info className="mx-auto mb-2 opacity-50"/>
+                     <p>Escanee una Orden SAP para activar el contexto de trabajo.</p>
+                 </div>
+             )}
         </div>
-      )}
-      {showAccessoryReprintModal && (
+      </div>
+
+      {isReprinting && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 backdrop-blur-sm">
-          <div className="bg-white p-6 rounded-2xl shadow-xl w-full max-w-md animate-in zoom-in-95">
-            <h3 className="text-lg font-bold mb-4 flex items-center"><Printer className="mr-2 text-blue-600"/> Reimprimir Etiqueta de Accesorio</h3>
-            <input
-              type="number"
-              min={1}
-              max={999}
-              autoFocus
-              className="w-full p-3 border rounded-lg text-xl font-mono text-center font-bold mb-4"
-              value={accessoryReprintQty}
-              onChange={e => setAccessoryReprintQty(Math.max(1, Math.min(999, Number(e.target.value))))}
-              placeholder="Cantidad"
-            />
-            <div className="flex gap-2 justify-end">
-              <button className="px-4 py-2 rounded-lg bg-slate-200 text-slate-700 font-bold hover:bg-slate-300" onClick={() => { setShowAccessoryReprintModal(false); setAccessoryReprintQty(1); }}>Cancelar</button>
-              <button className="px-4 py-2 rounded-lg bg-blue-600 text-white font-bold hover:bg-blue-700" onClick={async () => { await handleAccessoryReprint(); setShowAccessoryReprintModal(false); setAccessoryReprintQty(1); }} disabled={accessoryReprintQty < 1}>Reimprimir</button>
+            <div className="bg-white p-6 rounded-2xl shadow-xl w-full max-w-sm animate-in zoom-in-95">
+                <h3 className="text-lg font-bold mb-4 flex items-center"><Printer className="mr-2"/> Re-Impresión</h3>
+                <input type="number" className="w-full p-3 border rounded-lg text-lg mb-4 text-center font-bold" value={reprintQty} onChange={e => setReprintQty(Number(e.target.value))} min={1} />
+                <div className="flex gap-2"><button onClick={() => setIsReprinting(false)} className="flex-1 py-2 bg-slate-100 rounded-lg">Cancelar</button><button onClick={handleReprint} className="flex-1 py-2 bg-blue-600 text-white rounded-lg font-bold">Imprimir</button></div>
             </div>
-          </div>
         </div>
       )}
 
-      {/* --- MODAL DETALLE DE SERIAL --- */}
-      {selectedSerialDetail && (
+      {isSuffixReprinting && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 backdrop-blur-sm">
-          <div className="bg-white p-6 rounded-2xl shadow-xl w-full max-w-lg animate-in zoom-in-95">
-            <h3 className="text-lg font-bold mb-4 flex items-center"><Info className="mr-2 text-blue-600"/> Detalle de Serial</h3>
-            <div className="mb-2"><span className="font-bold text-slate-700">Serial:</span> <span className="font-mono text-blue-700">{selectedSerialDetail.serialNumber}</span></div>
-            <div className="mb-2"><span className="font-bold text-slate-700">Modelo:</span> <span className="font-mono text-purple-700">{(() => {
-              const part = activeParts.find(p => p.id === selectedSerialDetail.partNumberId);
-              return part ? part.productCode : '-';
-            })()}</span></div>
-            <div className="mb-2"><span className="font-bold text-slate-700">Prueba Funcional:</span> <span>{selectedSerialDetail.testFechaRegistro ? new Date(selectedSerialDetail.testFechaRegistro).toLocaleString() : '-'}</span></div>
-            <div className="mb-2"><span className="font-bold text-slate-700">Firmware:</span> <span>{selectedSerialDetail.testSensorFW || '-'}</span></div>
-            <div className="mb-2"><span className="font-bold text-slate-700">Estado:</span> <span>{selectedSerialDetail.isComplete ? <span className="text-green-600 font-bold">✔ Completado</span> : <span className="text-slate-400">Pendiente</span>}</span></div>
-            <div className="mb-4">
-              <span className="font-bold text-slate-700">Historial de Operaciones:</span>
-              <ul className="list-disc ml-6 mt-1 text-sm">
-                {selectedSerialDetail.history && selectedSerialDetail.history.length > 0 ? (
-                  selectedSerialDetail.history.map((h, idx) => (
-                    <li key={idx}>
-                      {h.operationName} por {h.operatorName} <span className="text-slate-400">({new Date(h.timestamp).toLocaleString()})</span>
-                    </li>
-                  ))
-                ) : <li className="text-slate-400">Sin historial</li>}
-              </ul>
-            </div>
-            <div className="mb-4">
-              <span className="font-bold text-slate-700">Etiquetas impresas:</span>
-              <ul className="list-disc ml-6 mt-1 text-sm">
-                {selectedSerialDetail.printHistory && selectedSerialDetail.printHistory.length > 0 ? (
-                  selectedSerialDetail.printHistory.map((ph, idx) => (
-                    <li key={idx}>{ph.fileName || 'Etiqueta'} <span className="text-slate-400">({ph.timestamp ? new Date(ph.timestamp).toLocaleString() : '-'})</span></li>
-                  ))
-                ) : <li className="text-slate-400">Sin etiquetas</li>}
-              </ul>
-            </div>
-            <div className="flex gap-2 justify-end">
-              <button className="px-4 py-2 rounded-lg bg-slate-200 text-slate-700 font-bold hover:bg-slate-300" onClick={() => setSelectedSerialDetail(null)}>Cerrar</button>
-            </div>
-          </div>
+             <div className="bg-white p-6 rounded-2xl shadow-xl w-full max-w-sm animate-in zoom-in-95">
+                <h3 className="text-lg font-bold mb-4 flex items-center"><Printer className="mr-2 text-purple-600"/> Re-imprimir Serial</h3>
+                <p className="text-sm text-slate-500 mb-3 text-center">Ingrese los últimos 3 dígitos del serial a reimprimir (Ej. 003)</p>
+                <div className="relative mb-4">
+                    <Hash className="absolute left-3 top-3 text-slate-400" size={20} />
+                    <input 
+                        type="text" 
+                        maxLength={3}
+                        autoFocus
+                        className="w-full pl-10 pr-4 p-3 border rounded-lg text-xl font-mono text-center font-bold tracking-widest uppercase" 
+                        value={reprintSuffix} 
+                        onChange={e => setReprintSuffix(e.target.value)} 
+                        placeholder="000"
+                    />
+                </div>
+                <div className="flex gap-2">
+                    <button onClick={() => { setIsSuffixReprinting(false); setReprintSuffix(''); }} className="flex-1 py-2 bg-slate-100 rounded-lg text-sm font-bold text-slate-600">Cancelar</button>
+                    <button onClick={handleReprintSuffix} className="flex-1 py-2 bg-purple-600 text-white rounded-lg font-bold shadow hover:bg-purple-700">Reimprimir</button>
+                </div>
+             </div>
         </div>
       )}
+
     </div>
   );
 }
 
-// Small helper components used by StationInterface. Kept minimal so they can be expanded later.
-function TrayProgressSummary({ serials, allOps }: { serials: SerialUnit[]; allOps: Operation[] }) {
-  if (!serials || serials.length === 0) return <div className="text-sm text-slate-500">No hay seriales en esta orden.</div>;
-  return (
-    <div className="space-y-2">
-      {serials.map(s => {
-        const op = allOps.find(o => o.id === s.currentOperationId);
-        const lastHistory = s.history && s.history.length > 0 ? s.history[s.history.length - 1] : null;
-        return (
-          <div key={s.serialNumber} className="flex items-center justify-between p-2 bg-white border rounded">
-            <div className="font-mono text-sm">{s.serialNumber}</div>
-            <div className="text-xs text-slate-500 text-right">
-              <div>{op ? op.name : lastHistory ? lastHistory.operationName : 'Sin operación'}</div>
-              <div className="font-bold text-slate-700">{s.isComplete ? 'Completado' : (lastHistory ? 'En Progreso' : 'Pendiente')}</div>
-            </div>
-          </div>
-        );
-      })}
-    </div>
-  );
+function TrayProgressSummary({ serials, allOps }: { serials: SerialUnit[], allOps: Operation[] }) {
+    const groups: Record<string, SerialUnit[]> = {};
+    serials.forEach(s => {
+        if(s.trayId) {
+            if(!groups[s.trayId]) groups[s.trayId] = [];
+            groups[s.trayId].push(s);
+        }
+    });
+
+    const trayIds = Object.keys(groups).sort();
+    if (trayIds.length === 0) return <p className="text-xs text-slate-400 italic text-center">No hay charolas generadas.</p>;
+
+    return (
+        <>
+            {trayIds.map(tid => {
+                const units = groups[tid];
+                const total = units.length;
+                const completed = units.filter(u => u.isComplete).length;
+                const locCounts: Record<string, number> = {};
+                units.forEach(u => {
+                    const op = u.currentOperationId;
+                    locCounts[op] = (locCounts[op] || 0) + 1;
+                });
+                const mainOpId = Object.keys(locCounts).sort((a,b) => locCounts[b] - locCounts[a])[0];
+                const opName = allOps.find(o => o.id === mainOpId)?.name || 'Iniciando';
+
+                return (
+                    <div key={tid} className="p-3 border rounded-lg text-sm bg-white shadow-sm">
+                        <div className="flex justify-between items-center mb-1">
+                            <span className="font-bold text-slate-700">Charola: {tid}</span>
+                            <span className="text-xs bg-slate-100 px-2 py-0.5 rounded text-slate-500 font-mono">{total} pzas</span>
+                        </div>
+                        <div className="flex justify-between items-center text-xs">
+                             <span className={`font-semibold ${completed === total ? 'text-green-600' : 'text-blue-600'}`}>{opName}</span>
+                             <span>{completed === total ? 'Completado' : 'En Proceso'}</span>
+                        </div>
+                        <div className="w-full h-1 bg-slate-100 mt-2 rounded-full overflow-hidden">
+                             <div className="bg-green-500 h-full" style={{width: `${(completed/total)*100}%`}}></div>
+                        </div>
+                    </div>
+                );
+            })}
+        </>
+    );
 }
 
 function SerialProgressList({ serials }: { serials: SerialUnit[] }) {
-  if (!serials || serials.length === 0) return <div className="text-sm text-slate-500">No hay unidades procesadas aún.</div>;
-  return (
-    <div className="space-y-2">
-      {serials.map(s => (
-        <div key={s.serialNumber} className="flex items-center justify-between p-2 bg-white border rounded">
-          <div className="font-mono text-sm">{s.serialNumber}</div>
-          <div className="text-xs text-slate-500">{s.isComplete ? 'Completado' : 'Activo'}</div>
+    const [modalSerialId, setModalSerialId] = useState<string | null>(null);
+    if (serials.length === 0) return <p className="text-xs text-slate-400 italic text-center">Sin actividad.</p>;
+    const recent = [...serials].sort((a,b) => {
+        const lastA = a.history[a.history.length-1]?.timestamp || '';
+        const lastB = b.history[b.history.length-1]?.timestamp || '';
+        return lastB.localeCompare(lastA);
+    }).slice(0, 20);
+    
+    const modalSerial = modalSerialId ? serials.find(s => s.serialNumber === modalSerialId) : null;
+
+    return (
+        <div className="space-y-2">
+            <div className="flex justify-between items-center p-2 border-b border-slate-200 text-xs font-bold bg-slate-50">
+                <span className="font-mono text-slate-600 uppercase">SERIAL</span>
+                <span className="text-slate-600">PRUEBA FUNCIONAL</span>
+                <span className="text-slate-600">FIRMWARE VERSION</span>
+                <span className="text-slate-600">Estado</span>
+            </div>
+            {recent.map(s => (
+                <div key={s.serialNumber} className="flex justify-between items-center p-2 border-b border-slate-50 text-xs">
+                    <span className="font-mono text-blue-700 font-bold cursor-pointer underline" onClick={() => setModalSerialId(s.serialNumber)}>{s.serialNumber}</span>
+                    <span>{s.testFechaRegistro ? new Date(s.testFechaRegistro).toLocaleString() : '-'}</span>
+                    <span>{s.testSensorFW || '-'}</span>
+                    {s.isComplete ? <CheckCircle size={14} className="text-green-500"/> : <span className="text-blue-500 font-bold">...</span>}
+                </div>
+            ))}
+            {/* Modal de detalle de serial */}
+            {modalSerial && (
+                <SerialDetailModal serial={modalSerial} onClose={() => setModalSerialId(null)} />
+            )}
         </div>
-      ))}
-    </div>
-  );
+    )
+}
+
+// Modal de detalle de serial
+function SerialDetailModal({ serial, onClose }: { serial: SerialUnit, onClose: () => void }) {
+    const [loading, setLoading] = useState(false);
+    const [msg, setMsg] = useState<string | null>(null);
+    const [partInfo, setPartInfo] = useState<PartNumber | null>(null);
+
+    useEffect(() => {
+        const loadPartInfo = async () => {
+            try {
+                const parts = await db.getParts();
+                const found = parts.find(p => p.id === serial.partNumberId);
+                setPartInfo(found || null);
+            } catch (e) {
+                console.error("Error loading part info", e);
+            }
+        };
+        loadPartInfo();
+    }, [serial.partNumberId]);
+
+    const handleReprintSerial = async () => {
+        setLoading(true);
+        setMsg(null);
+        try {
+            await db.printLabel(serial.serialNumber, serial.partNumberId, {
+                jobDescription: `Reimpresión desde modal ${serial.serialNumber}`
+            });
+            setMsg('Reimpresión enviada correctamente.');
+        } catch (e: any) {
+            setMsg('Error al reimprimir: ' + (e.message || e.toString()));
+        } finally {
+            setLoading(false);
+        }
+    };
+    return (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+            <div className="bg-white rounded-xl shadow-xl p-6 w-full max-w-lg relative animate-in zoom-in-95 max-h-[90vh] overflow-y-auto">
+                <button onClick={onClose} className="absolute top-4 right-4 text-slate-400 hover:text-slate-700 text-2xl font-bold">&times;</button>
+                
+                <h3 className="text-xl font-bold mb-4 text-slate-800 border-b pb-2">Detalle de Unidad</h3>
+                
+                <div className="grid grid-cols-2 gap-4 mb-6">
+                    <div className="bg-slate-50 p-3 rounded-lg border border-slate-100">
+                        <p className="text-xs text-slate-500 font-bold uppercase tracking-wider mb-1">Serial Number</p>
+                        <p className="font-mono text-lg font-bold text-blue-700 break-all">{serial.serialNumber}</p>
+                    </div>
+                    <div className="bg-slate-50 p-3 rounded-lg border border-slate-100">
+                        <p className="text-xs text-slate-500 font-bold uppercase tracking-wider mb-1">Estado</p>
+                        <p className={`font-bold ${serial.isComplete ? 'text-green-600' : 'text-orange-500'}`}>
+                            {serial.isComplete ? 'COMPLETADO' : 'EN PROCESO'}
+                        </p>
+                    </div>
+                    <div className="bg-slate-50 p-3 rounded-lg border border-slate-100">
+                        <p className="text-xs text-slate-500 font-bold uppercase tracking-wider mb-1">Número de Parte</p>
+                        <p className="font-mono font-medium text-slate-700">{partInfo?.partNumber || serial.partNumberId}</p>
+                    </div>
+                    <div className="bg-slate-50 p-3 rounded-lg border border-slate-100">
+                        <p className="text-xs text-slate-500 font-bold uppercase tracking-wider mb-1">Modelo</p>
+                        <p className="font-mono font-medium text-slate-700">{partInfo?.productCode || '-'}</p>
+                    </div>
+                </div>
+
+                <div className="mb-6">
+                    <h4 className="text-sm font-bold text-slate-700 mb-2 flex items-center"><Layers size={16} className="mr-2"/> Historial de Operaciones</h4>
+                    <div className="bg-slate-50 rounded-lg border border-slate-200 overflow-hidden">
+                        <ul className="divide-y divide-slate-200">
+                            {serial.history && serial.history.length > 0 ? serial.history.map((h, idx) => (
+                                <li key={idx} className="p-3 text-sm hover:bg-slate-100 transition-colors">
+                                    <div className="flex justify-between items-center mb-1">
+                                        <span className="font-bold text-slate-700">{h.operationName}</span>
+                                        <span className="text-xs text-slate-400">{new Date(h.timestamp).toLocaleString()}</span>
+                                    </div>
+                                    <div className="text-xs text-slate-500">
+                                        Operador: <span className="font-medium text-slate-600">{h.operatorName}</span>
+                                    </div>
+                                </li>
+                            )) : <li className="p-4 text-center text-slate-400 text-sm italic">Sin historial registrado</li>}
+                        </ul>
+                    </div>
+                </div>
+
+                <div className="mb-6">
+                    <h4 className="text-sm font-bold text-slate-700 mb-2 flex items-center"><Printer size={16} className="mr-2"/> Logs de Impresión</h4>
+                    <div className="bg-slate-50 rounded-lg border border-slate-200 overflow-hidden max-h-60 overflow-y-auto">
+                        <ul className="divide-y divide-slate-200">
+                            {serial.printHistory && serial.printHistory.length > 0 ? serial.printHistory.map((p, idx) => (
+                                <li key={idx} className="p-3 text-sm hover:bg-slate-100 transition-colors">
+                                    <div className="flex justify-between items-start mb-1">
+                                        <div>
+                                            <span className="font-bold text-slate-700 block">{p.fileName || 'Archivo desconocido'}</span>
+                                            <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-bold ${p.status === 'SUCCESS' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>{p.status}</span>
+                                        </div>
+                                        <span className="text-xs text-slate-400">{p.timestamp ? new Date(p.timestamp).toLocaleString() : '-'}</span>
+                                    </div>
+                                    <div className="mt-2 bg-slate-800 rounded p-2 overflow-x-auto">
+                                        <p className="text-[10px] font-mono text-green-400 whitespace-pre-wrap break-all">
+                                            {p.jobContent || p.message || 'Sin contenido de comando'}
+                                        </p>
+                                    </div>
+                                </li>
+                            )) : <li className="p-4 text-center text-slate-400 text-sm italic">Sin etiquetas impresas</li>}
+                        </ul>
+                    </div>
+                </div>
+
+                {msg && (
+                    <div className={`mb-4 p-3 rounded-lg text-center text-sm font-bold ${msg.startsWith('Error') ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}`}>
+                        {msg}
+                    </div>
+                )}
+
+                <div className="flex justify-end pt-2 border-t border-slate-100">
+                    <button 
+                        className="bg-blue-600 text-white px-6 py-2.5 rounded-lg font-bold hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm transition-all flex items-center"
+                        onClick={handleReprintSerial}
+                        disabled={loading}
+                    >
+                        {loading ? <RefreshCw className="animate-spin mr-2" size={16}/> : <Printer className="mr-2" size={16}/>}
+                        {loading ? 'Enviando...' : 'Reimprimir Última Etiqueta'}
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
 }
