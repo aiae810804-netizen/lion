@@ -603,6 +603,7 @@ function StationInterface({ operation, route, onBack, user }: StationProps) {
           setTraySerials(updatedList);
 
           await db.saveSerial({ ...serial, currentOperationId: operation.id, history: newHistory, operatorId: user.id });
+          setStatusMsg({ type: 'success', text: `Procesado: ${serial.serialNumber}`});
 
       } catch (e) {}
   };
@@ -637,6 +638,7 @@ function StationInterface({ operation, route, onBack, user }: StationProps) {
           
           setTraySerials(updatedList);
           setSelectAll(true);
+          setStatusMsg({ type: 'success', text: `${serialNumbers.length} unidades procesadas en charola.` });
 
       } catch (e:any) {
           console.error(e);
@@ -1028,24 +1030,8 @@ function StationInterface({ operation, route, onBack, user }: StationProps) {
                         {activeOrder && <span className="text-xs bg-blue-100 text-blue-800 px-2 py-1 rounded font-mono">Lote: {activeOrder.orderNumber}</span>}
                     </div>
 
-                    {operation.isInitial && isOrderComplete ? (
-                         <div className="bg-blue-50 border border-blue-200 rounded-xl p-6 text-center">
-                             <CheckCircle className="mx-auto text-green-500 mb-3" size={32}/>
-                             <h4 className="text-lg font-bold text-blue-800 mb-2">Orden Completada en esta Estación</h4>
-                             <p className="text-sm text-slate-600 mb-4">Todas las unidades ({scannedCount}) han sido procesadas.</p>
-                             
-                             <div className="grid grid-cols-2 gap-3">
-                                {activeOrderPart?.serialGenType !== 'LOT_BASED' && (
-                                  <button onClick={() => setIsReprinting(true)} className="px-4 py-2 bg-white border border-slate-300 rounded-lg text-slate-700 font-bold hover:bg-slate-50 flex items-center justify-center">
-                                      <Printer size={16} className="mr-2"/> Re-Imprimir
-                                  </button>
-                                )}
-                                <button onClick={() => { setActiveOrder(null); setSapOrderInput(''); setQtyInput(''); setModelInput(''); setSetupStep(1); }} className={`px-4 py-2 bg-blue-600 text-white rounded-lg font-bold hover:bg-blue-700 shadow flex items-center justify-center ${activeOrderPart?.serialGenType === 'LOT_BASED' ? 'col-span-2' : ''}`}>
-                                    <LogOut size={16} className="mr-2"/> Cerrar Orden
-                                </button>
-                             </div>
-                         </div>
-                    ) : (
+                        
+                    {
                         isLotBased ? (
                             operation.isInitial ? (
                                 <div className="space-y-4">
@@ -1165,7 +1151,7 @@ function StationInterface({ operation, route, onBack, user }: StationProps) {
                                 </div>
                             )
                         )
-                    )}
+                    }
                 </div>
             )}
             
