@@ -7,14 +7,16 @@ import { AuthContext } from './context/AuthContext';
 import { AlertProvider } from './context/AlertContext';
 
 // Icons
-import { Settings, LogOut, Scan, LayoutDashboard, XCircle, Loader2, BarChart3 } from 'lucide-react';
+import { Settings, LogOut, Scan, LayoutDashboard, XCircle, Loader2, BarChart3, FileJson } from 'lucide-react';
 
 // Components
 import Login from './pages/Login';
 import AdminDashboard from './pages/Admin/AdminDashboard';
+import TestAdmin from './pages/Admin/TestAdmin';
 import SupervisorDashboard from './pages/Supervisor/SupervisorDashboard';
 import OperatorStation from './pages/Operator/OperatorStation';
 import MainDashboard from './pages/Dashboard/MainDashboard';
+
 
 const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { user, logout } = React.useContext(AuthContext);
@@ -58,9 +60,14 @@ const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
           </button>
 
           {user.role === UserRole.ADMIN && (
-            <button onClick={() => navigate('/admin')} className={navItemClass('/admin')}>
-              <Settings size={20} className="mr-3" /> Admin Panel
-            </button>
+            <>
+              <button onClick={() => navigate('/admin')} className={navItemClass('/admin')}>
+                <Settings size={20} className="mr-3" /> Admin Panel
+              </button>
+              <button onClick={() => navigate('/test-admin')} className={navItemClass('/test-admin')}>
+                <FileJson size={20} className="mr-3" /> Test Admin
+              </button>
+            </>
           )}
         </nav>
 
@@ -141,7 +148,9 @@ function App() {
       <div className="min-h-screen bg-slate-900 flex flex-col items-center justify-center text-white p-8">
         <Loader2 size={48} className="animate-spin text-red-600 mb-6" />
         <div className="flex items-center gap-3 mb-4">
-            <div className="bg-red-600 text-white font-black text-2xl w-10 h-10 flex items-center justify-center rounded">H</div>
+           <div className="bg-white p-4 rounded-3xl shadow-2xl mb-2">
+              <img src="logo.png" alt="Honeywell Logo" className="h-24 w-auto object-contain" />
+            </div>
             <h2 className="text-2xl font-bold">Li-Ion Manufacturing</h2>
         </div>
         <p className="text-slate-400 mb-8">{dbStatus === 'connecting' ? 'Conectando a MS SQL Server...' : 'Verificando Estructura de Base de Datos...'}</p>
@@ -202,6 +211,10 @@ function App() {
 
               <Route path="/admin/*" element={
                 user?.role === UserRole.ADMIN ? <AdminDashboard /> : <Navigate to="/login" />
+              } />
+
+              <Route path="/test-admin" element={
+                user?.role === UserRole.ADMIN ? <TestAdmin /> : <Navigate to="/login" />
               } />
 
               <Route path="/supervisor/*" element={

@@ -1,53 +1,62 @@
 import React, { useState, useEffect, useContext, useMemo } from 'react';
 import { db } from '../../services/storage';
-import { WorkOrder, SerialUnit, PartNumber, Operation, PrintLog, UserRole } from '../../types';
-import { Search, Lock, Unlock, Monitor, Eye, X, History, Trash2, Printer, AlertCircle, CheckCircle, RefreshCw, Edit2, Save, Filter, Package } from 'lucide-react';
+import { WorkOrder, SerialUnit, PartNumber, Operation, UserRole } from '../../types';
+import { Search, Lock, Unlock, Monitor, Eye, X, History, Trash2, Printer, Archive, RefreshCw, Edit2, Save, Package, CheckCircle, Plus, List } from 'lucide-react';
 import { useAlert } from '../../context/AlertContext';
 import { AuthContext } from '../../context/AuthContext';
+import ReprintTab from './ReprintTab';
 
 export default function SupervisorDashboard() {
-  const [activeTab, setActiveTab] = useState<'orders' | 'trace' | 'stations'>('orders');
+  const [activeTab, setActiveTab] = useState<'orders' | 'trace' | 'stations' | 'reprint' | 'excel'>('orders');
 
   return (
-    <div>
-      <div className="mb-8 flex justify-between items-end">
+    <div className="h-full flex flex-col">
+      <div className="mb-6 flex justify-between items-end">
         <div>
-          <h1 className="text-3xl font-bold text-slate-900">Gestión de Producción</h1>
-          <p className="text-slate-500">Órdenes de trabajo y rastreabilidad de producto.</p>
+          <h1 className="text-2xl font-bold text-slate-900">Gestión de Producción</h1>
+          <p className="text-slate-500 text-sm">Control de piso, órdenes y rastreabilidad.</p>
         </div>
       </div>
 
-      <div className="flex space-x-1 bg-white p-1 rounded-xl shadow-sm inline-flex mb-6">
-        <button
+      <div className="flex items-center gap-6 mb-6 border-b border-slate-200 pb-1">
+        <button 
           onClick={() => setActiveTab('orders')}
-          className={`px-6 py-2 rounded-lg text-sm font-medium transition-colors ${
-            activeTab === 'orders' ? 'bg-slate-900 text-white shadow-md' : 'text-slate-500 hover:bg-slate-50'
-          }`}
+          className={`flex items-center gap-2 px-4 py-2 border-b-2 transition-colors ${activeTab === 'orders' ? 'border-blue-600 text-blue-600 font-bold' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
         >
-          Órdenes de Trabajo
+          <Archive size={18} /> Órdenes
         </button>
-        <button
+        <button 
           onClick={() => setActiveTab('trace')}
-          className={`px-6 py-2 rounded-lg text-sm font-medium transition-colors ${
-            activeTab === 'trace' ? 'bg-slate-900 text-white shadow-md' : 'text-slate-500 hover:bg-slate-50'
-          }`}
+          className={`flex items-center gap-2 px-4 py-2 border-b-2 transition-colors ${activeTab === 'trace' ? 'border-blue-600 text-blue-600 font-bold' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
         >
-          Rastreabilidad (Logs)
+          <List size={18} /> Rastreabilidad
         </button>
-        <button
+        <button 
           onClick={() => setActiveTab('stations')}
-          className={`px-6 py-2 rounded-lg text-sm font-medium transition-colors ${
-            activeTab === 'stations' ? 'bg-slate-900 text-white shadow-md' : 'text-slate-500 hover:bg-slate-50'
-          }`}
+          className={`flex items-center gap-2 px-4 py-2 border-b-2 transition-colors ${activeTab === 'stations' ? 'border-blue-600 text-blue-600 font-bold' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
         >
-          Monitor de Estaciones
+          <Monitor size={18} /> Estaciones
+        </button>
+        <button 
+          onClick={() => setActiveTab('reprint')}
+          className={`flex items-center gap-2 px-4 py-2 border-b-2 transition-colors ${activeTab === 'reprint' ? 'border-blue-600 text-blue-600 font-bold' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
+        >
+          <Printer size={18} /> Reimpresión
+        </button>
+        <button 
+          onClick={() => setActiveTab('excel')}
+          className={`flex items-center gap-2 px-4 py-2 border-b-2 transition-colors ${activeTab === 'excel' ? 'border-blue-600 text-blue-600 font-bold' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
+        >
+          <List size={18} /> Plan de Producción (SIOP)
         </button>
       </div>
 
-      <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 min-h-[600px]">
+      <div className="flex-1 overflow-hidden bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
         {activeTab === 'orders' && <OrdersManager />}
         {activeTab === 'trace' && <TraceabilityView />}
         {activeTab === 'stations' && <StationsMonitor />}
+        {activeTab === 'reprint' && <ReprintTab />}
+        {activeTab === 'excel' && <ExcelDataTab />}
       </div>
     </div>
   );
@@ -57,6 +66,7 @@ function StationsMonitor() {
   const [ops, setOps] = useState<(Operation & { activeOperatorName?: string, activeOperatorId?: string })[]>([]);
   const [historyToday, setHistoryToday] = useState<any[]>([]);
   const { showConfirm, showAlert, showLoading, hideLoading } = useAlert();
+  const [serialsRefreshKey, setSerialsRefreshKey] = useState(0);
 
   const loadData = async () => {
     const data = await db.getOperations();
@@ -95,6 +105,11 @@ function StationsMonitor() {
     return () => clearInterval(interval);
   }, []);
 
+  useEffect(() => {
+    // Fetch serials/history when serialsRefreshKey changes
+    loadData();
+  }, [serialsRefreshKey]);
+
   const handleUnlock = async (opId: string) => {
     const confirmed = await showConfirm(
       "Confirmar Desbloqueo",
@@ -116,7 +131,7 @@ function StationsMonitor() {
   };
 
   return (
-    <div>
+    <div className="h-full overflow-auto">
       <h3 className="text-lg font-bold text-slate-800 mb-4 flex items-center"><Monitor className="mr-2"/> Estado de Estaciones</h3>
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
         {ops.map(op => (
@@ -181,12 +196,22 @@ function OrdersManager() {
   const [parts, setParts] = useState<PartNumber[]>([]);
   const [orderCounts, setOrderCounts] = useState<Record<string, number>>({});
   const { showAlert, showConfirm, showLoading, hideLoading } = useAlert();
-  
+  // Paginación
+  const [page, setPage] = useState(1);
+  const pageSize = 5;
+  const totalPages = Math.ceil(orders.length / pageSize);
+
   // Filtering State
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<'ALL' | 'OPEN' | 'CLOSED'>('ALL');
   const [dateStart, setDateStart] = useState('');
   const [dateEnd, setDateEnd] = useState('');
+  const [showForm, setShowForm] = useState(false);
+
+  // New Order Form State
+  const [sapOrder, setSapOrder] = useState('');
+  const [productCode, setProductCode] = useState('');
+  const [qty, setQty] = useState(100);
 
   // Modal for managing serials in an order
   const [managingOrder, setManagingOrder] = useState<WorkOrder | null>(null);
@@ -196,6 +221,7 @@ function OrdersManager() {
   // Editing Order State
   const [editingOrder, setEditingOrder] = useState<WorkOrder | null>(null);
 
+  // Carga completa: todas las órdenes, ordenadas de más nueva a más vieja
   const loadData = async () => {
     try {
         const [o, p, allSerials] = await Promise.all([
@@ -203,7 +229,9 @@ function OrdersManager() {
             db.getParts(),
             db.getSerials()
         ]);
-        setOrders(o);
+        // Ordenar por lote interno descendente (más nuevo primero)
+        const sorted = o.sort((a, b) => b.orderNumber.localeCompare(a.orderNumber));
+        setOrders(sorted);
         setParts(p);
 
         // Calculate counts
@@ -212,7 +240,7 @@ function OrdersManager() {
             counts[s.orderNumber] = (counts[s.orderNumber] || 0) + 1;
         });
         setOrderCounts(counts);
-
+        setPage(1); // Reset page on reload
     } catch (e: any) {
         console.error("Error loading orders data", e);
         showAlert("Error", "Error cargando datos: " + e.message, "error");
@@ -226,6 +254,24 @@ function OrdersManager() {
       await loadData();
       hideLoading();
   }
+
+  const handleCreate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!sapOrder || !productCode) return;
+    showLoading("Creando Orden...");
+    try {
+      await db.generateAutoOrder(sapOrder, productCode, qty);
+      setShowForm(false);
+      setSapOrder('');
+      setProductCode('');
+      await loadData();
+      hideLoading();
+      showAlert("Éxito", "Orden creada correctamente", "success");
+    } catch (err: any) {
+      hideLoading();
+      showAlert("Error", err.message, "error");
+    }
+  };
 
   // --- ORDER EDITING LOGIC ---
   const handleEditOrder = (order: WorkOrder) => {
@@ -307,6 +353,7 @@ function OrdersManager() {
   }
 
   const getPartCode = (id: string) => parts.find(p => p.id === id)?.partNumber || id;
+  const getProductCode = (id: string) => parts.find(p => p.id === id)?.productCode || '-';
 
   // Filtered Logic
   const filteredOrders = useMemo(() => {
@@ -335,11 +382,17 @@ function OrdersManager() {
     });
   }, [orders, searchTerm, statusFilter, dateStart, dateEnd]);
 
+  // Paginación: solo mostrar las órdenes de la página actual
+  const paginatedOrders = useMemo(() => {
+    const startIdx = (page - 1) * pageSize;
+    return filteredOrders.slice(startIdx, startIdx + pageSize);
+  }, [filteredOrders, page, pageSize]);
+
   const isAdmin = user?.role === UserRole.ADMIN;
   const isSupervisor = user?.role === UserRole.SUPERVISOR;
 
   return (
-    <div className="space-y-6 relative">
+    <div className="space-y-6 relative h-full flex flex-col">
       
       {/* FILTER BAR */}
       <div className="bg-slate-50 p-4 rounded-xl border border-slate-100 flex flex-wrap gap-4 items-end">
@@ -386,74 +439,108 @@ function OrdersManager() {
              <button onClick={handleRefresh} className="flex items-center text-sm text-slate-600 hover:text-blue-600 bg-white border border-slate-200 px-3 py-2 rounded-lg shadow-sm hover:shadow transition-all">
                 <RefreshCw size={16} className="mr-2"/> Refrescar
              </button>
+             <button onClick={() => setShowForm(!showForm)} className="bg-blue-600 text-white px-4 py-2 rounded-lg flex items-center gap-2 hover:bg-blue-700 text-sm font-medium shadow-sm">
+                <Plus size={18} /> Nueva Orden
+             </button>
           </div>
       </div>
+
+      {showForm && (
+        <div className="p-4 bg-slate-50 border border-slate-200 rounded-lg animate-in slide-in-from-top-2">
+          <form onSubmit={handleCreate} className="flex gap-4 items-end flex-wrap">
+            <div>
+              <label className="block text-xs font-bold text-slate-500 mb-1">Orden SAP</label>
+              <input type="text" value={sapOrder} onChange={e => setSapOrder(e.target.value)} className="border p-2 rounded w-40" placeholder="Ej. 100500" required />
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-slate-500 mb-1">Modelo / SKU</label>
+              <select value={productCode} onChange={e => setProductCode(e.target.value)} className="border p-2 rounded w-48" required>
+                <option value="">-- Seleccionar --</option>
+                {parts.map(p => <option key={p.id} value={p.productCode}>{p.productCode}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-slate-500 mb-1">Cantidad</label>
+              <input type="number" value={qty} onChange={e => setQty(Number(e.target.value))} className="border p-2 rounded w-24" min="1" required />
+            </div>
+            <button type="submit" className="bg-green-600 text-white px-6 py-2 rounded hover:bg-green-700 font-medium">Crear</button>
+            <button type="button" onClick={() => setShowForm(false)} className="text-slate-500 px-4 py-2 hover:underline">Cancelar</button>
+          </form>
+        </div>
+      )}
 
       <div className="flex justify-end mb-2">
          <p className="text-xs text-slate-400 italic">* Mostrando {filteredOrders.length} ordenes.</p>
       </div>
 
       {/* Orders Table */}
-      <table className="w-full text-sm text-left">
-        <thead className="bg-slate-100 text-slate-600 font-semibold">
-          <tr>
-            <th className="p-4 rounded-tl-lg">Lote Interno</th>
-            <th className="p-4 text-blue-700">Orden SAP</th>
-            <th className="p-4">Número Parte</th>
-            <th className="p-4">Asignado / Total</th>
-            <th className="p-4">Fecha</th>
-            <th className="p-4">Estatus</th>
-            <th className="p-4 rounded-tr-lg text-right">Acciones</th>
-          </tr>
-        </thead>
-        <tbody>
-          {filteredOrders.map(o => {
-            const assigned = orderCounts[o.orderNumber] || 0;
-            const progress = Math.min((assigned / o.quantity) * 100, 100);
-            
-            // Logic: Can edit if Admin OR if Order is not Closed
-            const canEdit = isAdmin || (o.status !== 'CLOSED');
-
-            return (
+      <div className="flex-1 overflow-auto border rounded-lg">
+        <table className="w-full text-sm text-left">
+          <thead className="bg-slate-100 text-slate-600 font-semibold sticky top-0">
+            <tr>
+              <th className="p-4 rounded-tl-lg">Lote Interno</th>
+              <th className="p-4 text-blue-700">Orden SAP</th>
+              <th className="p-4">Número Parte</th>
+              <th className="p-4">Modelo</th>
+              <th className="p-4">Asignado / Total</th>
+              <th className="p-4">Fecha</th>
+              <th className="p-4">Estatus</th>
+              <th className="p-4 rounded-tr-lg text-right">Acciones</th>
+            </tr>
+          </thead>
+          <tbody>
+            {paginatedOrders.map(o => {
+              const assigned = orderCounts[o.orderNumber] || 0;
+              const progress = Math.min((assigned / o.quantity) * 100, 100);
+              const canEdit = isAdmin || (o.status !== 'CLOSED');
+              return (
                 <tr key={o.id} className="border-b border-slate-100 hover:bg-slate-50">
-                <td className="p-4 font-bold text-slate-800">{o.orderNumber}</td>
-                <td className="p-4 font-mono font-medium text-blue-700">{o.sapOrderNumber || '-'}</td>
-                <td className="p-4">{getPartCode(o.partNumberId)}</td>
-                <td className="p-4">
+                  <td className="p-4 font-bold text-slate-800">{o.orderNumber}</td>
+                  <td className="p-4 font-mono font-medium text-blue-700">{o.sapOrderNumber || '-'}</td>
+                  <td className="p-4">{getPartCode(o.partNumberId)}</td>
+                  <td className="p-4">{getProductCode(o.partNumberId)}</td>
+                  <td className="p-4">
                     <div className="flex flex-col w-32">
-                        <span className="font-bold text-slate-700 text-xs mb-1">
-                            {assigned} / {o.quantity}
-                        </span>
-                        <div className="w-full bg-slate-200 rounded-full h-1.5 overflow-hidden">
-                            <div
-                                className={`h-1.5 rounded-full ${progress >= 100 ? 'bg-green-500' : 'bg-blue-600'}`}
-                                style={{ width: `${progress}%` }}
-                            ></div>
-                        </div>
+                      <span className="font-bold text-slate-700 text-xs mb-1">
+                        {assigned} / {o.quantity}
+                      </span>
+                      <div className="w-full bg-slate-200 rounded-full h-1.5 overflow-hidden">
+                        <div
+                          className={`h-1.5 rounded-full ${progress >= 100 ? 'bg-green-500' : 'bg-blue-600'}`}
+                          style={{ width: `${progress}%` }}
+                        ></div>
+                      </div>
                     </div>
-                </td>
-                <td className="p-4 text-slate-500">{new Date(o.createdAt).toLocaleDateString()}</td>
-                <td className="p-4">
-                    <span className={`px-2 py-1 rounded-full text-xs font-bold ${o.status === 'OPEN' ? 'bg-blue-100 text-blue-700' : 'bg-gray-200 text-gray-700'}`}>
-                    {o.status}
-                    </span>
-                </td>
-                <td className="p-4 flex justify-end gap-2">
+                  </td>
+                  <td className="p-4 text-slate-500">{new Date(o.createdAt).toLocaleDateString()}</td>
+                  <td className="p-4">
+                    <span className={`px-2 py-1 rounded-full text-xs font-bold ${o.status === 'OPEN' ? 'bg-blue-100 text-blue-700' : 'bg-gray-200 text-gray-700'}`}>{o.status}</span>
+                  </td>
+                  <td className="p-4 flex justify-end gap-2">
                     <button onClick={() => openManageSerials(o)} className="text-blue-600 hover:text-blue-800 border border-blue-200 p-1.5 rounded hover:bg-blue-50" title="Ver Seriales">
-                        <Eye size={16} />
+                      <Eye size={16} />
                     </button>
                     {canEdit && (
-                        <button onClick={() => handleEditOrder(o)} className="text-slate-600 hover:text-slate-800 border border-slate-200 p-1.5 rounded hover:bg-slate-50" title="Editar Orden">
-                            <Edit2 size={16} />
-                        </button>
+                      <button onClick={() => handleEditOrder(o)} className="text-slate-600 hover:text-slate-800 border border-slate-200 p-1.5 rounded hover:bg-slate-50" title="Editar Orden">
+                        <Edit2 size={16} />
+                      </button>
                     )}
-                </td>
+                  </td>
                 </tr>
-            );
-          })}
-          {filteredOrders.length === 0 && <tr><td colSpan={7} className="p-8 text-center text-slate-400">No se encontraron órdenes con los filtros actuales.</td></tr>}
-        </tbody>
-      </table>
+              );
+            })}
+            {paginatedOrders.length === 0 && (
+              <tr><td colSpan={8} className="p-8 text-center text-slate-400">No se encontraron órdenes con los filtros actuales.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      {/* Paginación */}
+      <div className="flex justify-center items-center gap-2 mt-4">
+        <button onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1} className="px-3 py-1 rounded border bg-white disabled:opacity-50">Anterior</button>
+        <span className="text-sm font-bold">Página {page} de {totalPages}</span>
+        <button onClick={() => setPage(p => Math.min(totalPages, p + 1))} disabled={page === totalPages} className="px-3 py-1 rounded border bg-white disabled:opacity-50">Siguiente</button>
+      </div>
 
       {/* Edit Order Modal */}
       {editingOrder && (
@@ -607,7 +694,7 @@ function TraceabilityView() {
   }, [traceType, serials, orders, searchTerm, parts]);
 
   return (
-    <div>
+    <div className="h-full flex flex-col">
       <div className="flex justify-between items-center mb-6">
         <div className="flex bg-slate-100 p-1 rounded-lg">
             <button onClick={() => setTraceType('SERIAL')} className={`px-4 py-2 text-sm font-bold rounded-md transition-colors ${traceType === 'SERIAL' ? 'bg-white shadow text-blue-700' : 'text-slate-500'}`}>
@@ -628,9 +715,9 @@ function TraceabilityView() {
         </div>
       </div>
 
-      <div className="overflow-x-auto rounded-lg border border-slate-200">
+      <div className="flex-1 overflow-auto rounded-lg border border-slate-200">
         <table className="w-full text-sm text-left">
-          <thead className="bg-slate-800 text-white">
+          <thead className="bg-slate-800 text-white sticky top-0">
             <tr>
               {traceType === 'SERIAL' ? (
                 <>
@@ -894,4 +981,184 @@ function SerialDetailModal({ serial, part, onClose }: { serial: SerialUnit, part
             </div>
         </div>
     )
+}
+
+function ExcelDataTab() {
+  const [data, setData] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [search, setSearch] = useState('');
+  const [filters, setFilters] = useState({
+    MATERIAL: '',
+    Semana: '',
+    Status: ''
+  });
+  const [sort, setSort] = useState<{col: string, dir: 'asc' | 'desc'}>({col: '', dir: 'asc'});
+  const [syncing, setSyncing] = useState(false);
+
+  useEffect(() => {
+    setLoading(true);
+    fetch('/api/excel-data')
+      .then(res => res.json())
+      .then(result => {
+        if (result.success) {
+          setData(result.data);
+          setError('');
+        } else {
+          setError(result.error || 'Error desconocido');
+        }
+        setLoading(false);
+      })
+      .catch(e => {
+        setError(e.message);
+        setLoading(false);
+      });
+  }, []);
+
+  // Unique values for filters
+  const materials = useMemo(() => Array.from(new Set(data.map(d => d.MATERIAL).filter(Boolean))), [data]);
+  const semanas = useMemo(() => Array.from(new Set(data.map(d => d.Semana).filter(Boolean))), [data]);
+  const statuses = useMemo(() => Array.from(new Set(data.map(d => d.Status).filter(Boolean))), [data]);
+
+  // Filtering and searching
+  const filteredData = useMemo(() => {
+    let rows = data;
+    // Filtros
+    if (filters.MATERIAL) rows = rows.filter(r => r.MATERIAL === filters.MATERIAL);
+    if (filters.Semana) rows = rows.filter(r => r.Semana === filters.Semana);
+    if (filters.Status) rows = rows.filter(r => r.Status === filters.Status);
+    // Búsqueda global
+    if (search) {
+      const s = search.toLowerCase();
+      rows = rows.filter(r => Object.values(r).some(v => (v+'').toLowerCase().includes(s)));
+    }
+    // Ordenamiento
+    if (sort.col) {
+      rows = [...rows].sort((a, b) => {
+        if (a[sort.col] < b[sort.col]) return sort.dir === 'asc' ? -1 : 1;
+        if (a[sort.col] > b[sort.col]) return sort.dir === 'asc' ? 1 : -1;
+        return 0;
+      });
+    }
+    return rows;
+  }, [data, filters, search, sort]);
+
+  const handleSort = (col: string) => {
+    setSort(s => s.col === col ? {col, dir: s.dir === 'asc' ? 'desc' : 'asc'} : {col, dir: 'asc'});
+  };
+
+  return (
+    <div className="h-full overflow-auto">
+      <h3 className="text-lg font-bold text-slate-800 mb-4 flex items-center"><List className="mr-2"/> Plan de Producción (SIOP)</h3>
+      <div className="mb-4 flex flex-wrap gap-4 items-end">
+        <input
+          type="text"
+          placeholder="Buscar en todos los campos..."
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+          className="border p-2 rounded-lg text-sm min-w-[200px]"
+        />
+        <select
+          title="Filtrar por Material"
+          value={filters.MATERIAL}
+          onChange={e => setFilters(f => ({...f, MATERIAL: e.target.value}))}
+          className="border p-2 rounded-lg text-sm"
+        >
+          <option value="">Material (Todos)</option>
+          {materials.map(m => <option key={m} value={m}>{m}</option>)}
+        </select>
+        <select
+          title="Filtrar por Semana"
+          value={filters.Semana}
+          onChange={e => setFilters(f => ({...f, Semana: e.target.value}))}
+          className="border p-2 rounded-lg text-sm"
+        >
+          <option value="">Semana (Todas)</option>
+          {semanas.map(s => <option key={s} value={s}>{s}</option>)}
+        </select>
+        <select
+          title="Filtrar por Status"
+          value={filters.Status}
+          onChange={e => setFilters(f => ({...f, Status: e.target.value}))}
+          className="border p-2 rounded-lg text-sm"
+        >
+          <option value="">Status (Todos)</option>
+          {statuses.map(st => <option key={st} value={st}>{st}</option>)}
+        </select>
+        <button onClick={() => {setFilters({MATERIAL:'', Semana:'', Status:''}); setSearch(''); setSort({col:'',dir:'asc'});}} className="px-3 py-2 text-xs font-bold text-slate-500 hover:bg-slate-200 rounded-lg">Limpiar</button>
+        <button
+          onClick={async () => {
+            setLoading(true);
+            setError('');
+            setSyncing(true);
+            try {
+              const resp = await fetch('/api/excel-data/refresh', { method: 'POST' });
+              if (!resp.ok) throw new Error('Error al sincronizar');
+              // Espera a que termine y recarga datos
+              const res = await fetch('/api/excel-data');
+              const result = await res.json();
+              if (result.success) {
+                setData(result.data);
+              } else {
+                setError(result.error || 'Error desconocido');
+              }
+            } catch (e: any) {
+              setError(e.message);
+            }
+            setLoading(false);
+            setSyncing(false);
+          }}
+          className="px-3 py-2 text-xs font-bold text-blue-700 bg-blue-100 hover:bg-blue-200 rounded-lg flex items-center gap-2"
+          disabled={loading || syncing}
+        >
+          {syncing ? (
+            <span className="animate-spin mr-2">🔄</span>
+          ) : (
+            <span className="mr-2">🔄</span>
+          )}
+          Refrescar SIOP
+        </button>
+      </div>
+      {syncing && (
+        <div className="text-center text-blue-600 font-bold mb-2">Sincronizando con archivo SIOP...</div>
+      )}
+      {loading ? (
+        <div className="text-center text-slate-400 py-8">Cargando datos...</div>
+      ) : error ? (
+        <div className="text-center text-red-600 py-8">{error}</div>
+      ) : (
+        <div className="overflow-x-auto rounded-lg border border-slate-200 max-h-96 overflow-y-auto">
+          <table className="w-full text-sm text-left">
+            <thead className="bg-slate-100 text-slate-600 sticky top-0">
+              <tr>
+                <th className="p-3 cursor-pointer" onClick={() => handleSort('MATERIAL')}>Material {sort.col==='MATERIAL'? (sort.dir==='asc' ? '▲' : '▼') : ''}</th>
+                <th className="p-3 cursor-pointer" onClick={() => handleSort('Qty')}>Cantidad {sort.col==='Qty'? (sort.dir==='asc' ? '▲' : '▼') : ''}</th>
+                <th className="p-3 cursor-pointer" onClick={() => handleSort('Semana')}>Semana {sort.col==='Semana'? (sort.dir==='asc' ? '▲' : '▼') : ''}</th>
+                <th className="p-3 cursor-pointer" onClick={() => handleSort('Fecha')}>Fecha {sort.col==='Fecha'? (sort.dir==='asc' ? '▲' : '▼') : ''}</th>
+                <th className="p-3 cursor-pointer" onClick={() => handleSort('Orden')}>Orden {sort.col==='Orden'? (sort.dir==='asc' ? '▲' : '▼') : ''}</th>
+                <th className="p-3 cursor-pointer" onClick={() => handleSort('Producido')}>Producido {sort.col==='Producido'? (sort.dir==='asc' ? '▲' : '▼') : ''}</th>
+                <th className="p-3 cursor-pointer" onClick={() => handleSort('Status')}>Status {sort.col==='Status'? (sort.dir==='asc' ? '▲' : '▼') : ''}</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {filteredData.map((row, idx) => (
+                <tr key={idx} className="hover:bg-slate-50">
+                  <td className="p-3">{row.MATERIAL}</td>
+                  <td className="p-3">{row.Qty}</td>
+                  <td className="p-3">{row.Semana}</td>
+                  <td className="p-3">{row.Fecha}</td>
+                  <td className="p-3">{row.Orden}</td>
+                  <td className="p-3">{row.Producido}</td>
+                  <td className="p-3">{row.Status}</td>
+                </tr>
+              ))}
+              {filteredData.length === 0 && (
+                <tr><td colSpan={7} className="p-4 text-center text-slate-400">Sin datos de Plan de Producción (SIOP).</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
 }

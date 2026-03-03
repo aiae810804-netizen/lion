@@ -39,6 +39,11 @@ export default function MainDashboard() {
   const [dateEnd, setDateEnd] = useState(new Date().toISOString().split('T')[0]);
   
   const [lastRefreshed, setLastRefreshed] = useState(new Date());
+  const [serialsRefreshKey, setSerialsRefreshKey] = useState(0);
+
+  const refreshSerials = () => {
+    setSerialsRefreshKey(k => k + 1);
+  };
 
   const loadDashboardData = async () => {
     setLoading(true);
@@ -66,7 +71,7 @@ export default function MainDashboard() {
     loadDashboardData();
     const interval = setInterval(loadDashboardData, 60000); // Auto-refresh every minute
     return () => clearInterval(interval);
-  }, []);
+  }, [serialsRefreshKey]);
 
   // --- CALCULATION LOGIC ---
   const stats = useMemo(() => {

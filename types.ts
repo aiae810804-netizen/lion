@@ -20,6 +20,14 @@ export interface Operation {
   isFinal: boolean; // For Empaque logic
   requireTestLog?: boolean; // Validar si unidades fueron probadas previo a iniciar
 }
+export interface TestLog {
+  fechaRegistro: string;
+  sensorName: string;
+  sensorFW: string;
+  hub?: string;
+  hubFW?: string;
+  status: string;
+}
 
 export interface ProcessRouteStep {
   id: string;
@@ -47,6 +55,8 @@ export interface PartNumber {
   serialMask: string; // e.g., "31########"
   serialGenType?: SerialGenType;
   processRouteId?: string; // New field
+  StdBoxQty?: number; 
+  picture?: string;
 }
 
 export interface WorkOrder {
@@ -80,7 +90,7 @@ export interface LabelConfig {
   labelType: 'NAMEPLATE' | 'CARTON1' | 'CARTON2'| 'BOX_LABEL';
 }
 
-export type LabelDataSource = 'SERIAL' | 'PART' | 'SKU' | 'DESC' | 'DATE' | 'STATIC';
+export type LabelDataSource = 'SERIAL' | 'PART' | 'SKU' | 'SAPORDER' | 'ORDERQTY' | 'DESC' | 'DATE' | 'STATIC';
 
 export interface LabelField {
   id: number;

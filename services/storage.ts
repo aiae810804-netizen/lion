@@ -32,7 +32,18 @@ export const dbSystem = {
   initDatabase: async (): Promise<string[]> => {
     const res = await apiCall<{ success: boolean, logs: string[] }>('/setup', 'POST');
     return res.logs;
-  }
+  },
+ exportData: (tables?: string[]) => {
+    const query = tables ? `?tables=${tables.join(',')}` : '';
+    return apiCall<any>(`/admin/export${query}`);
+  },
+ importData: (data: any, selectedTables?: string[]) => 
+    apiCall<{ success: boolean, logs: string[] }>('/admin/import', 'POST', { data, selectedTables }),
+  
+  // Métodos para importación por lotes (Chunks)
+  prepareImport: (selectedTables: string[]) => apiCall<{ success: boolean }>('/admin/import/prepare', 'POST', { selectedTables }),
+  importChunk: (table: string, rows: any[]) => apiCall<{ success: boolean, count: number }>('/admin/import/chunk', 'POST', { table, rows }),
+  finalizeImport: () => apiCall<{ success: boolean }>('/admin/import/finalize', 'POST')
 };
 
 export const db = {
@@ -82,13 +93,14 @@ export const db = {
      apiCall<{ success: boolean, orderNumber: string, orderId: string }>('/orders/generate', 'POST', { sapOrderNumber, productCode, quantity, mask }),
 
   getSerials: () => apiCall<SerialUnit[]>('/serials'),
+  getSerialsByOrder: (orderNumber: string) => apiCall<SerialUnit[]>(`/serials/order/${encodeURIComponent(orderNumber)}`),
   // New method for Tray Fetch
   getSerialsByTray: (trayId: string) => apiCall<SerialUnit[]>(`/serials/tray/${encodeURIComponent(trayId)}`),
   
   saveSerial: (unit: Partial<SerialUnit> & { isAutoGenerate?: boolean }) => apiCall<{success: boolean, generatedSerial?: string}>('/serials', 'POST', unit),
   
   // High performance batch update
-  updateBatchSerials: (data: { serials: string[], operationId: string, operatorId: string, isComplete?: boolean }) => 
+  updateBatchSerials: (data: { trayId: string, operationId: string, operatorId: string, isComplete?: boolean }) => 
      apiCall<{ success: boolean }>('/serials/batch-update', 'POST', data),
 
   // New method for Batch Generation (Added autoComplete)
@@ -128,4 +140,25 @@ export const db = {
     // If not found, return null and optionally handle message
     return null;
   },
+  importTestResults: (events: any[]) => apiCall<{ success: boolean, message: string, count: number }>('/sensors/events/bulk', 'POST', events),
+  
+  // GOLDEN SERIALS
+  getGoldenSerials: () => apiCall<{ SerialNumber: string, Type: 'M3' | 'HUB' }[]>('/golden-serials'),
+  addGoldenSerial: (serialNumber: string, type: 'M3' | 'HUB') => apiCall('/golden-serials', 'POST', { serialNumber, type }),
+  deleteGoldenSerial: (serialNumber: string) => apiCall(`/golden-serials/${encodeURIComponent(serialNumber)}`, 'DELETE'),
 };
+// --- INICIO: FUNCIÓN PARA OBTENER PROGRESO DE ORDEN POR orderNumber ---
+export async function getOrderProgressByOrderNumber(orderNumber: string) {
+  const res = await fetch(`/api/order-progress/${orderNumber}`);
+  if (!res.ok) throw new Error('No se pudo obtener el progreso de la orden');
+  return res.json();
+}
+// --- FIN: FUNCIÓN PARA OBTENER PROGRESO DE ORDEN POR orderNumber ---
+
+// --- INICIO: FUNCIÓN PARA OBTENER PROGRESO DE ORDEN POR orderId (batch/seriales) ---
+export async function getOrderProgressByOrderId(orderId: string) {
+  const res = await fetch(`/api/order-progressid/${orderId}`);
+  if (!res.ok) throw new Error('No se pudo obtener el progreso de la orden (por orderId)');
+  return res.json();
+}
+// --- FIN: FUNCIÓN PARA OBTENER PROGRESO DE ORDEN POR orderId ---

@@ -4,8 +4,10 @@ import cors from 'cors';
 import fs from 'fs';
 import path from 'path';
 import { exec } from 'child_process';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
-import { sql, sqlConfig, masterConfig, SCHEMA_SCRIPTS, SEED_QUERIES, getTestLogBySerial } from './db.js';
+import { sql, sqlConfig, masterConfig, SCHEMA_SCRIPTS, SEED_QUERIES } from './db.js';
+import * as excelDataRouter from './excelDataRouter.js';
 
 const app = express();
 // Puerto 3000 por defecto si no hay variable de entorno
@@ -31,7 +33,7 @@ const SYSTEM_PRINT_CONFIG = {
 const SYSTEM_TABLES = [
     'Users', 'Operations', 'ProcessRoutes', 'ProcessRouteSteps', 
     'PartNumbers', 'WorkOrders', 'Serials', 'SerialHistory', 
-    'PrintLogs', 'LabelConfigs', 'LabelFields', 'test_logs'
+    'PrintLogs', 'LabelConfigs', 'LabelFields', 'test_logs', 'GoldenSerials'
 ];
 
 app.use(cors());
@@ -204,124 +206,108 @@ app.post('/api/setup', async (req, res) => {
 });
 
 app.use(dbMiddleware);
+app.use('/api/excel-data', excelDataRouter.default || excelDataRouter);
 
 
 // --- BACKUP & RESTORE ---
-app.get('/api/admin/export', dbMiddleware, async (req, res) => {
-    try {
-        const backup = {
-            version: '1.0.0',
-            timestamp: new Date().toISOString(),
-            data: {}
-        };
-        for (const table of SYSTEM_TABLES) {
-            // Detectar columna IDENTITY
-            const identityRes = await req.db.request().query(`SELECT name FROM sys.identity_columns WHERE object_id = OBJECT_ID('${table}')`);
-            const identityCol = identityRes.recordset.length > 0 ? identityRes.recordset[0].name : null;
-            const result = await req.db.request().query(`SELECT * FROM ${table}`);
-            let rows = result.recordset;
-            // Si la tabla tiene columna IDENTITY, excluye el campo Id (o el identityCol)
-            if (identityCol) {
-                rows = rows.map(row => {
-                    const copy = { ...row };
-                    delete copy[identityCol]; // Elimina el campo identity
-                    // También elimina 'Id' si el identityCol es diferente (por seguridad)
-                    if (identityCol !== 'Id') delete copy['Id'];
-                    return copy;
-                });
-            }
-            backup.data[table] = rows;
-        }
-        res.json(backup);
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
 
-app.post('/api/admin/import', dbMiddleware, async (req, res) => {
-    const { data } = req.body;
-    if (!data) return res.status(400).json({ error: 'No se recibieron datos para importar.' });
+// --- BACKUP & RESTORE ---
+app.post('/api/admin/import/prepare', dbMiddleware, async (req, res) => {
+    const { selectedTables } = req.body;
+    if (!selectedTables || !Array.isArray(selectedTables)) return res.status(400).json({ error: 'Seleccione tablas válidas.' });
     
-    const logs = [];
     try {
-        const transaction = new sql.Transaction(req.db);
-        await transaction.begin();
-
+        console.log("[IMPORT] Preparando tablas para importación por lotes...");
+        // 1. Desactivar constraints
         for (const table of SYSTEM_TABLES) {
-            const tableData = data[table];
-            if (!tableData || !Array.isArray(tableData)) {
-                logs.push(`[INFO] Tabla ${table}: No se encontró información en el archivo de origen.`);
-                continue;
-            }
-
-            // Obtener columnas actuales de la BD para comparación dinámica
-            const schemaRes = await transaction.request()
-                .query(`SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '${table}'`);
-            const dbColumns = schemaRes.recordset.map(r => r.COLUMN_NAME);
-
-            // Verificar si la tabla tiene columna IDENTITY
-            const identityRes = await transaction.request()
-                .query(`SELECT name FROM sys.identity_columns WHERE object_id = OBJECT_ID('${table}')`);
-            const identityCol = identityRes.recordset.length > 0 ? identityRes.recordset[0].name : null;
-            
-            // Limpiar tabla actual antes de la importación maestra
-            await transaction.request().query(`DELETE FROM ${table}`);
-
-            let importedRows = 0;
-            let schemaMismatchLogged = false;
-            let identityInsertEnabled = false;
-
-            // Si hay columna identity y los datos la incluyen, activar IDENTITY_INSERT
-            if (identityCol && tableData.length > 0 && Object.prototype.hasOwnProperty.call(tableData[0], identityCol)) {
-                await transaction.request().query(`SET IDENTITY_INSERT ${table} ON`);
-                identityInsertEnabled = true;
-            }
-
-            for (const row of tableData) {
-                const rowKeys = Object.keys(row);
-                // Filtrar solo las columnas que sí existen en la base de datos destino
-                const validKeys = rowKeys.filter(k => dbColumns.includes(k));
-                
-                // Indicar si hay discrepancias de esquema (solo una vez por tabla)
-                if (!schemaMismatchLogged) {
-                    const extraInSource = rowKeys.filter(k => !dbColumns.includes(k));
-                    const missingInSource = dbColumns.filter(k => !rowKeys.includes(k));
-
-                    if (extraInSource.length > 0) {
-                        logs.push(`[WARN] Tabla ${table}: El origen tiene columnas extra (${extraInSource.join(', ')}) que serán ignoradas.`);
-                    }
-                    if (missingInSource.length > 0) {
-                        logs.push(`[INFO] Tabla ${table}: Faltan columnas en el origen (${missingInSource.join(', ')}). Se usarán valores por defecto/NULL.`);
-                    }
-                    schemaMismatchLogged = true;
-                }
-
-                if (validKeys.length > 0) {
-                    const columnsStr = validKeys.join(', ');
-                    const valuesStr = validKeys.map(k => {
-                        const val = row[k];
-                        if (val === null || val === undefined) return 'NULL';
-                        if (typeof val === 'string') return `'${val.replace(/'/g, "''")}'`;
-                        if (typeof val === 'boolean') return val ? 1 : 0;
-                        if (val instanceof Date) return `'${val.toISOString()}'`;
-                        return val;
-                    }).join(', ');
-
-                    await transaction.request().query(`INSERT INTO ${table} (${columnsStr}) VALUES (${valuesStr})`);
-                    importedRows++;
-                }
-            }
-
-            if (identityInsertEnabled) {
-                await transaction.request().query(`SET IDENTITY_INSERT ${table} OFF`);
-            }
-            logs.push(`[OK] Tabla ${table}: ${importedRows} registros importados exitosamente.`);
+            await req.db.request().query(`ALTER TABLE ${table} NOCHECK CONSTRAINT ALL`);
         }
-        await transaction.commit();
-        res.json({ success: true, logs });
-    } catch (e) { 
-        console.error("[IMPORT ERROR]", e);
-        res.status(500).json({ error: "Fallo crítico durante la transacción: " + e.message }); 
+        // 2. Limpiar solo las tablas seleccionadas en orden inverso
+        const reverseTables = [...SYSTEM_TABLES].reverse().filter(t => selectedTables.includes(t));
+        for (const table of reverseTables) {
+            await req.db.request().query(`DELETE FROM ${table}`);
+            console.log(`[IMPORT] Tabla ${table} vaciada.`);
+        }
+        res.json({ success: true });
+    } catch (e) {
+        console.error("[IMPORT PREPARE ERROR]", e);
+        res.status(500).json({ error: e.message });
     }
 });
+
+app.post('/api/admin/import/chunk', dbMiddleware, async (req, res) => {
+    const { table, rows } = req.body;
+    if (!table || !rows || !Array.isArray(rows)) return res.status(400).json({ error: 'Datos de lote inválidos.' });
+
+    try {
+        const request = req.db.request();
+        request.timeout = 60000; // 1 minuto por lote
+
+        // Obtener esquema
+        const schemaRes = await request.query(`SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '${table}'`);
+        const dbColumns = schemaRes.recordset.map(r => r.COLUMN_NAME);
+        
+        const identityRes = await request.query(`SELECT name FROM sys.identity_columns WHERE object_id = OBJECT_ID('${table}')`);
+        const identityCol = identityRes.recordset.length > 0 ? identityRes.recordset[0].name : null;
+
+        let identityInsertEnabled = false;
+        if (identityCol && rows.length > 0) {
+            const hasIdentityInSource = Object.keys(rows[0]).some(k => k.toLowerCase() === identityCol.toLowerCase());
+            if (hasIdentityInSource) {
+                await request.query(`SET IDENTITY_INSERT ${table} ON`);
+                identityInsertEnabled = true;
+            }
+        }
+
+        for (const row of rows) {
+            const rowKeys = Object.keys(row);
+            const validKeys = [];
+            const values = [];
+
+            for (const dbCol of dbColumns) {
+                const sourceKey = rowKeys.find(k => k.toLowerCase() === dbCol.toLowerCase());
+                if (sourceKey !== undefined) {
+                    validKeys.push(dbCol);
+                    const val = row[sourceKey];
+                    if (val === null || val === undefined) values.push('NULL');
+                    else if (typeof val === 'string') values.push(`'${val.replace(/'/g, "''")}'`);
+                    else if (typeof val === 'boolean') values.push(val ? 1 : 0);
+                    else if (val instanceof Date) values.push(`'${val.toISOString()}'`);
+                    else values.push(val);
+                } else if (dbCol.toLowerCase() === 'id' && !identityCol) {
+                    validKeys.push(dbCol);
+                    values.push(`'${crypto.randomUUID()}'`);
+                }
+            }
+
+            if (validKeys.length > 0) {
+                await request.query(`INSERT INTO ${table} (${validKeys.join(', ')}) VALUES (${values.join(', ')})`);
+            }
+        }
+
+        if (identityInsertEnabled) await request.query(`SET IDENTITY_INSERT ${table} OFF`);
+        res.json({ success: true, count: rows.length });
+    } catch (e) {
+        console.error(`[IMPORT CHUNK ERROR] Table ${table}:`, e);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.post('/api/admin/import/finalize', dbMiddleware, async (req, res) => {
+    try {
+        console.log("[IMPORT] Finalizando y validando integridad...");
+        for (const table of SYSTEM_TABLES) {
+            await req.db.request().query(`ALTER TABLE ${table} WITH CHECK CHECK CONSTRAINT ALL`);
+        }
+        res.json({ success: true });
+    } catch (e) {
+        console.error("[IMPORT FINALIZE ERROR]", e);
+        res.status(500).json({ error: "Error de integridad: " + e.message });
+    }
+});
+
+
+
 
 
 app.post('/api/auth/login', async (req, res) => {
@@ -529,19 +515,49 @@ app.post('/api/operations/:id/unlock', async (req, res) => {
 // PARTS (Update to include SerialGenType and Route)
 app.get('/api/parts', async (req, res) => {
     const result = await req.db.request().query('SELECT * FROM PartNumbers');
-    res.json(result.recordset.map(p => ({ id: p.Id, partNumber: p.PartNumber, revision: p.Revision, description: p.Description, productCode: p.ProductCode, serialMask: p.SerialMask, serialGenType: p.SerialGenType, processRouteId: p.ProcessRouteId })));
+    res.json(result.recordset.map(p => ({ id: p.Id, partNumber: p.PartNumber, revision: p.Revision, description: p.Description, productCode: p.ProductCode, serialMask: p.SerialMask, serialGenType: p.SerialGenType, processRouteId: p.ProcessRouteId, StdBoxQty: p.StdBoxQty,picture: p.Picture })));
 });
 app.post('/api/parts', async (req, res) => {
-    const { id, partNumber, revision, description, productCode, serialMask, serialGenType, processRouteId } = req.body;
-    await req.db.request().input('Id', sql.NVarChar, id).input('PartNumber', sql.NVarChar, partNumber).input('Revision', sql.NVarChar, revision).input('Description', sql.NVarChar, description).input('ProductCode', sql.NVarChar, productCode).input('SerialMask', sql.NVarChar, serialMask).input('GenType', sql.NVarChar, serialGenType || 'PCB_SERIAL').input('RouteId', sql.NVarChar, processRouteId)
-        .query('INSERT INTO PartNumbers VALUES (@Id, @PartNumber, @Revision, @Description, @ProductCode, @SerialMask, @GenType, @RouteId)');
-    res.json({ success: true });
+    const { id, partNumber, revision, description, productCode, serialMask, serialGenType, processRouteId, StdBoxQty, picture } = req.body;
+    try {
+        await req.db.request()
+            .input('Id', sql.NVarChar, id)
+            .input('PN', sql.NVarChar, partNumber)
+            .input('Rev', sql.NVarChar, revision)
+            .input('Desc', sql.NVarChar, description)
+            .input('PC', sql.NVarChar, productCode)
+            .input('Mask', sql.NVarChar, serialMask)
+            .input('SGT', sql.NVarChar, serialGenType)
+            .input('RID', sql.NVarChar, processRouteId)
+            .input('SBQ', sql.Int, StdBoxQty || 1)
+            .input('Pic', sql.NVarChar, picture || null)
+            .query(`INSERT INTO PartNumbers (Id, PartNumber, Revision, Description, ProductCode, SerialMask, SerialGenType, ProcessRouteId, StdBoxQty, Picture) 
+                    VALUES (@Id, @PN, @Rev, @Desc, @PC, @Mask, @SGT, @RID, @SBQ, @Pic)`);
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
+
 app.put('/api/parts/:id', async (req, res) => {
-    const { partNumber, revision, description, productCode, serialMask, serialGenType, processRouteId } = req.body;
-    await req.db.request().input('Id', sql.NVarChar, req.params.id).input('PartNumber', sql.NVarChar, partNumber).input('Revision', sql.NVarChar, revision).input('Description', sql.NVarChar, description).input('ProductCode', sql.NVarChar, productCode).input('SerialMask', sql.NVarChar, serialMask).input('GenType', sql.NVarChar, serialGenType || 'PCB_SERIAL').input('RouteId', sql.NVarChar, processRouteId)
-        .query('UPDATE PartNumbers SET PartNumber=@PartNumber, Revision=@Revision, Description=@Description, ProductCode=@ProductCode, SerialMask=@SerialMask, SerialGenType=@GenType, ProcessRouteId=@RouteId WHERE Id=@Id');
-    res.json({ success: true });
+    const { partNumber, revision, description, productCode, serialMask, serialGenType, processRouteId, StdBoxQty, picture } = req.body;
+    try {
+        await req.db.request()
+            .input('Id', sql.NVarChar, req.params.id)
+            .input('PN', sql.NVarChar, partNumber)
+            .input('Rev', sql.NVarChar, revision)
+            .input('Desc', sql.NVarChar, description)
+            .input('PC', sql.NVarChar, productCode)
+            .input('Mask', sql.NVarChar, serialMask)
+            .input('SGT', sql.NVarChar, serialGenType)
+            .input('RID', sql.NVarChar, processRouteId)
+            .input('SBQ', sql.Int, StdBoxQty || 1)
+            .input('Pic', sql.NVarChar, picture || null)
+            .query(`UPDATE PartNumbers SET 
+                    PartNumber = @PN, Revision = @Rev, Description = @Desc, 
+                    ProductCode = @PC, SerialMask = @Mask, SerialGenType = @SGT, 
+                    ProcessRouteId = @RID, StdBoxQty = @SBQ, Picture = @Pic 
+                    WHERE Id = @Id`);
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 app.delete('/api/parts/:id', async (req, res) => {
     await req.db.request().input('Id', sql.NVarChar, req.params.id).query('DELETE FROM PartNumbers WHERE Id=@Id');
@@ -552,6 +568,17 @@ app.delete('/api/parts/:id', async (req, res) => {
 app.get('/api/orders', async (req, res) => {
     const result = await req.db.request().query('SELECT * FROM WorkOrders');
     res.json(result.recordset.map(o => ({ id: o.Id, orderNumber: o.OrderNumber, sapOrderNumber: o.SAPOrderNumber, partNumberId: o.PartNumberId, quantity: o.Quantity, status: o.Status, createdAt: o.CreatedAt, mask: o.Mask })));
+});
+
+app.get('/api/orders/:number', async (req, res) => {
+    try {
+        const result = await req.db.request().input('N', sql.NVarChar, req.params.number).query('SELECT * FROM WorkOrders WHERE OrderNumber = @N');
+        if (result.recordset.length === 0) return res.status(404).json({ error: "Order not found" });
+        const r = result.recordset[0];
+        res.json({
+            id: r.Id, orderNumber: r.OrderNumber, sapOrderNumber: r.SAPOrderNumber, partNumberId: r.PartNumberId, quantity: r.Quantity, status: r.Status, createdAt: r.CreatedAt, mask: r.Mask
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // UPDATED PUT: Partial updates to prevent NULL errors
@@ -574,7 +601,7 @@ app.put('/api/orders/:id', async (req, res) => {
     await request.query(query);
     res.json({ success: true });
 });
-app.post('/api/orders/generate', async (req, res) => {
+app.post('/api/orders/generate_oldie', async (req, res) => {
     const { sapOrderNumber, productCode, quantity, mask } = req.body;
 
     if (!sapOrderNumber || !productCode || !quantity) return res.status(400).json({ error: "Faltan datos (SAP Order, SKU, Qty)." });
@@ -584,10 +611,11 @@ app.post('/api/orders/generate', async (req, res) => {
         const sapCheck = await req.db.request().input('SAP', sql.NVarChar, sapOrderNumber).query('SELECT Id FROM WorkOrders WHERE SAPOrderNumber = @SAP');
         if (sapCheck.recordset.length > 0) throw new Error(`La Orden SAP ${sapOrderNumber} ya existe en el sistema.`);
 
-        // 1. Look up Part ID from Product Code
-        const partRes = await req.db.request().input('Code', sql.NVarChar, productCode).query('SELECT Id, PartNumber FROM PartNumbers WHERE ProductCode = @Code');
+        // 1. Look up Part ID and SerialGenType from Product Code
+        const partRes = await req.db.request().input('Code', sql.NVarChar, productCode).query('SELECT Id, PartNumber, SerialGenType FROM PartNumbers WHERE ProductCode = @Code');
         if (partRes.recordset.length === 0) throw new Error("Producto/Modelo no encontrado en el sistema.");
         const partId = partRes.recordset[0].Id;
+        const serialGenType = partRes.recordset[0].SerialGenType || 'LOT_BASED';
 
         // 2. Generate Internal Lot Number
         const now = new Date();
@@ -595,10 +623,8 @@ app.post('/api/orders/generate', async (req, res) => {
         const baseYear = 2025;
         const baseCharCode = 75; // 'K'
         let yearCode = (year - baseYear >= 0 && year - baseYear <= 15) ? String.fromCharCode(baseCharCode + (year - baseYear)) : "AA";
-        
         const quarterCode = ['A', 'B', 'C', 'D'][Math.floor(now.getMonth() / 3)];
         const prefix = `${yearCode}${quarterCode}`;
-        
         const lastOrderResult = await req.db.request().input('Prefix', sql.NVarChar, prefix + '%').query(`SELECT TOP 1 OrderNumber FROM WorkOrders WHERE OrderNumber LIKE @Prefix ORDER BY OrderNumber DESC`);
         let sequence = 1;
         if (lastOrderResult.recordset.length > 0) {
@@ -626,13 +652,92 @@ app.post('/api/orders/generate', async (req, res) => {
         res.status(500).json({ error: e.message });
     }
 });
-app.delete('/api/orders/:id', async (req, res) => {
-    await req.db.request().input('Id', sql.NVarChar, req.params.id).query('DELETE FROM WorkOrders WHERE Id=@Id');
-    res.json({ success: true });
+app.post('/api/orders/generate', async (req, res) => {
+    const { sapOrderNumber, productCode, quantity, mask } = req.body;
+
+    if (!sapOrderNumber || !productCode || !quantity) return res.status(400).json({ error: "Faltan datos (SAP Order, SKU, Qty)." });
+
+    const maxRetries = 5;
+    let attempt = 0;
+    let success = false;
+    let newLotNumber = null;
+    let newId = null;
+    let errorMsg = null;
+
+    try {
+        // 0. Verify SAP Order Uniqueness
+        const sapCheck = await req.db.request().input('SAP', sql.NVarChar, sapOrderNumber).query('SELECT Id FROM WorkOrders WHERE SAPOrderNumber = @SAP');
+        if (sapCheck.recordset.length > 0) throw new Error(`La Orden SAP ${sapOrderNumber} ya existe en el sistema.`);
+
+        // 1. Look up Part ID and SerialGenType from Product Code
+        const partRes = await req.db.request().input('Code', sql.NVarChar, productCode).query('SELECT Id, PartNumber, SerialGenType FROM PartNumbers WHERE ProductCode = @Code');
+        if (partRes.recordset.length === 0) throw new Error("Producto/Modelo no encontrado en el sistema.");
+        const partId = partRes.recordset[0].Id;
+        const serialGenType = partRes.recordset[0].SerialGenType || 'LOT_BASED';
+
+        while (!success && attempt < maxRetries) {
+            attempt++;
+            // 2. Generate Internal Lot Number
+            const now = new Date();
+            const year = now.getFullYear();
+            const baseYear = 2025;
+            const baseCharCode = 75; // 'K'
+            let yearCode = (year - baseYear >= 0 && year - baseYear <= 15) ? String.fromCharCode(baseCharCode + (year - baseYear)) : "AA";
+            const quarterCode = ['A', 'B', 'C', 'D'][Math.floor(now.getMonth() / 3)];
+            const prefix = `${yearCode}${quarterCode}`;
+            const lastOrderResult = await req.db.request().input('Prefix', sql.NVarChar, prefix + '%').query(`SELECT TOP 1 OrderNumber FROM WorkOrders WHERE OrderNumber LIKE @Prefix ORDER BY OrderNumber DESC`);
+            let sequence = 1;
+            if (lastOrderResult.recordset.length > 0) {
+                const match = lastOrderResult.recordset[0].OrderNumber.match(/(\d+)$/);
+                if (match) sequence = parseInt(match[0], 10) + 1;
+            }
+            newLotNumber = `${prefix}${sequence.toString().padStart(3, '0')}`;
+            // Aplica prefijo según tipo
+            if (serialGenType === 'ACCESSORIES') {
+                newLotNumber = 'A' + newLotNumber;
+            } else if (serialGenType === 'PCB_SERIAL') {
+                newLotNumber = 'G3' + newLotNumber;
+            }
+            newId = `wo_${Date.now()}`;
+
+            // Check for duplicate LOT number
+            const lotCheck = await req.db.request().input('LotNum', sql.NVarChar, newLotNumber).query('SELECT Id FROM WorkOrders WHERE OrderNumber = @LotNum');
+            if (lotCheck.recordset.length > 0) {
+                // Duplicate found, retry
+                continue;
+            }
+
+            // 3. Create Order
+            try {
+                await req.db.request()
+                    .input('Id', sql.NVarChar, newId)
+                    .input('LotNum', sql.NVarChar, newLotNumber)
+                    .input('SapNum', sql.NVarChar, sapOrderNumber)
+                    .input('PartId', sql.NVarChar, partId)
+                    .input('Qty', sql.Int, quantity)
+                    .input('Status', sql.NVarChar, 'OPEN')
+                    .input('Mask', sql.NVarChar, mask || 'DEFAULT')
+                    .query('INSERT INTO WorkOrders (Id, OrderNumber, SAPOrderNumber, PartNumberId, Quantity, Status, CreatedAt, Mask) VALUES (@Id, @LotNum, @SapNum, @PartId, @Qty, @Status, GETDATE(), @Mask)');
+                success = true;
+            } catch (insertErr) {
+                errorMsg = insertErr.message;
+                // If duplicate error, retry
+                if (insertErr.message && insertErr.message.includes('duplicate')) {
+                    continue;
+                } else {
+                    throw insertErr;
+                }
+            }
+        }
+        if (success) {
+            res.json({ success: true, orderNumber: newLotNumber, orderId: newId });
+        } else {
+            res.status(500).json({ error: 'No se pudo generar un número de lote único. ' + (errorMsg || '') });
+        }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
-
-// ... (Label Configs and Fields endpoints kept same)
-
 app.get('/api/label-configs', async (req, res) => {
     const result = await req.db.request().query('SELECT * FROM LabelConfigs ORDER BY Sku, LabelType');
     const configs = result.recordset.map(c => ({
@@ -678,7 +783,7 @@ app.delete('/api/label-fields/:id', async (req, res) => {
 
 // PRINT ENDPOINT (Updated for Exclusion Logic)
 app.post('/api/print-label', async (req, res) => {
-    const { serialNumber, partNumber, sku, quantity, cancelJob, cancelPrinter, closeApp = true, excludeLabelTypes, jobDescription } = req.body;
+    const { serialNumber,partNumber,sapOrderNumber,orderQuantity, sku, quantity, cancelJob, cancelPrinter, closeApp = true, excludeLabelTypes, labelType, jobDescription } = req.body;
 
     // serialNumber can be a serial or an order number, so we call it printIdentifier
     const printIdentifier = serialNumber;
@@ -715,6 +820,10 @@ app.post('/api/print-label', async (req, res) => {
             configs = configs.filter(c => !excludeLabelTypes.includes(c.LabelType));
         }
 
+        if (labelType) {
+            configs = configs.filter(c => c.LabelType === labelType);
+        }
+
         if (configs.length === 0) {
             if (excludeLabelTypes) return res.json({ success: true, message: "No labels to print after filtering." });
             throw new Error(`No config for SKU: ${sku}`);
@@ -747,11 +856,13 @@ app.post('/api/print-label', async (req, res) => {
                         case 'SERIAL': val = printIdentifier; break;
                         case 'PART': val = partNumber; break;
                         case 'SKU': val = finalSku; break;
+                        case 'SAPORDER': val = sapOrderNumber; break;
+                        case 'ORDERQTY': val = orderQuantity;break;
                         case 'DESC': val = "N/A"; break;
                         case 'DATE': val = new Date().toLocaleDateString(); break;
                         case 'STATIC': val = f.StaticValue || ""; break;
                     }
-                    val = val.replace(/"/g, ''); 
+                    val = String(val).replace(/"/g, ''); 
                     cmdContent += `${f.FieldName}="${val}"${EOL}`;
                 });
             } 
@@ -794,7 +905,7 @@ app.post('/api/print-label', async (req, res) => {
 });
 
 // MULTI PRINT ENDPOINT (For 100 distinctive Nameplates)
-app.post('/api/print-label/multi', async (req, res) => {
+/*app.post('/api/print-label/multi', async (req, res) => {
     const { serials, sku, partNumber } = req.body; 
     // serials: { serialNumber: string }[]
 
@@ -836,7 +947,7 @@ app.post('/api/print-label/multi', async (req, res) => {
                         case 'DATE': val = new Date().toLocaleDateString(); break;
                         case 'STATIC': val = f.StaticValue || ""; break;
                     }
-                    val = val.replace(/"/g, ''); 
+                    val = String(val).replace(/"/g, ''); 
                     cmdContent += `${f.FieldName}="${val}"${EOL}`;
                 });
             }
@@ -885,6 +996,153 @@ app.post('/api/print-label/multi', async (req, res) => {
 
     } catch (e) {
         res.status(500).json({ error: e.message });
+    }
+});*/
+app.post('/api/print-label', async (req, res) => {
+    const { serialNumber,partNumber,sapOrderNumber,orderQuantity, sku, quantity, cancelJob, cancelPrinter, closeApp = true, excludeLabelTypes, labelType, jobDescription, rawJobContent } = req.body;
+
+    // serialNumber can be a serial or an order number, so we call it printIdentifier
+    const printIdentifier = serialNumber;
+
+    if (!printIdentifier || !partNumber) return res.status(400).json({ error: "Faltan datos." });
+
+    const logPrintJob = async (logData) => {
+        const {
+            printId, status, message, fileName, jobId, jobContent
+        } = logData;
+        try {
+            await req.db.request()
+                .input('Id', sql.NVarChar, printId)
+                .input('Status', sql.NVarChar, status)
+                .input('Msg', sql.NVarChar, message)
+                .input('FileName', sql.NVarChar, fileName || null)
+                .input('JobId', sql.NVarChar, jobId || null)
+                .input('JobContent', sql.NVarChar, jobContent || null)
+                .query(`INSERT INTO PrintLogs (PrintIdentifier, Status, Message, FileName, JobId, JobContent) 
+                        VALUES (@Id, @Status, @Msg, @FileName, @JobId, @JobContent)`);
+        } catch (e) {
+            console.error("[PRINT LOG ERROR]", e.message);
+        }
+    };
+
+    try {
+        if (rawJobContent) {
+            const jobFileName = `job_reprint_${Date.now()}_${serialNumber.replace(/[^a-zA-Z0-9]/g, '')}.cmd`;
+            const cmdFilePath = path.join(TEMP_PRINT_DIR, jobFileName);
+            
+            fs.writeFileSync(cmdFilePath, rawJobContent);
+            
+            const command = `"${SYSTEM_PRINT_CONFIG.EXE_PATH}" "${cmdFilePath}" /W`;
+
+            const logData = {
+                printId: serialNumber,
+                fileName: "REPRINT",
+                jobId: jobFileName,
+                jobContent: rawJobContent
+            };
+
+            exec(command, async (error, stdout, stderr) => {
+                if (error) {
+                    await logPrintJob({ ...logData, status: 'ERROR', message: "Reprint Error: " + error.message });
+                    return;
+                }
+                await logPrintJob({ ...logData, status: 'SUCCESS', message: "Reprinted successfully" });
+            });
+
+            return res.json({ success: true, message: "Reprint job sent" });
+        }
+
+        let configs = [];
+        if (sku) {
+            const configResult = await req.db.request().input('Sku', sql.NVarChar, sku).query('SELECT * FROM LabelConfigs WHERE Sku = @Sku');
+            configs = configResult.recordset;
+        }
+
+        if (excludeLabelTypes && Array.isArray(excludeLabelTypes)) {
+            configs = configs.filter(c => !excludeLabelTypes.includes(c.LabelType));
+        }
+
+        if (labelType) {
+            configs = configs.filter(c => c.LabelType === labelType);
+        }
+
+        if (configs.length === 0) {
+            if (excludeLabelTypes) return res.json({ success: true, message: "No labels to print after filtering." });
+            throw new Error(`No config for SKU: ${sku}`);
+        }
+
+        const EOL = '\r\n';
+        const finalSku = sku || ""; 
+        let cmdContent = "";
+
+        for (const config of configs) {
+            let labelName = config.LabelName;
+            if (labelName.toLowerCase().endsWith('.fmt')) labelName = labelName.slice(0, -4);
+            
+            const fullFormatPath = path.join(config.FormatPath, labelName);
+            const finalQuantity = quantity || config.DefaultQuantity || 1;
+            
+            const fieldsResult = await req.db.request().input('ConfigId', sql.NVarChar, config.Id).query('SELECT * FROM LabelFields WHERE LabelConfigId = @ConfigId');
+            const customFields = fieldsResult.recordset;
+
+            cmdContent += `print${EOL}`;
+            cmdContent += `formatname="${fullFormatPath}"${EOL}`;
+            cmdContent += `formatcount=${finalQuantity}${EOL}`; 
+            cmdContent += `printername="${config.PrinterName}"${EOL}`;
+            cmdContent += `singlejob=on${EOL}`;
+            
+            if (customFields.length > 0) {
+                customFields.forEach(f => {
+                    let val = "";
+                    switch(f.DataSource) {
+                        case 'SERIAL': val = printIdentifier; break;
+                        case 'PART': val = partNumber; break;
+                        case 'SKU': val = finalSku; break;
+                        case 'SAPORDER': val = sapOrderNumber; break;
+                        case 'ORDERQTY': val = orderQuantity;break;
+                        case 'DESC': val = "N/A"; break;
+                        case 'DATE': val = new Date().toLocaleDateString(); break;
+                        case 'STATIC': val = f.StaticValue || ""; break;
+                    }
+                    val = String(val).replace(/"/g, ''); 
+                    cmdContent += `${f.FieldName}="${val}"${EOL}`;
+                });
+            } 
+            
+            cmdContent += `jobdescription="${jobDescription || ('Print ' + config.LabelType)}";${EOL}${EOL}`;
+        }
+
+        if (cancelJob) cmdContent += `cancel job=${cancelJob};${EOL}`;
+        if (cancelPrinter) cmdContent += `cancel printername="${cancelPrinter}";${EOL}`;
+        if (closeApp) cmdContent += `${EOL}close;${EOL}`;
+
+        const jobFileName = `job_${Date.now()}_${printIdentifier.replace(/[^a-zA-Z0-9]/g, '')}.cmd`;
+        const cmdFilePath = path.join(TEMP_PRINT_DIR, jobFileName);
+        
+        fs.writeFileSync(cmdFilePath, cmdContent);
+        
+        const command = `"${SYSTEM_PRINT_CONFIG.EXE_PATH}" "${cmdFilePath}" /W`;
+
+        const logData = {
+            printId: printIdentifier,
+            fileName: configs.map(c => c.LabelName).join(', '),
+            jobId: jobFileName,
+            jobContent: cmdContent
+        };
+
+        exec(command, async (error, stdout, stderr) => {
+            if (error) {
+                await logPrintJob({ ...logData, status: 'ERROR', message: error.message });
+                return;
+            }
+            await logPrintJob({ ...logData, status: 'SUCCESS', message: `Sent ${configs.length} labels` });
+        });
+
+        res.json({ success: true, message: "Job sent", file: cmdFilePath });
+
+    } catch (err) {
+        await logPrintJob({ printId: printIdentifier, status: 'ERROR', message: 'System Error: ' + err.message });
+        res.status(500).json({ error: err.message });
     }
 });
 
@@ -950,6 +1208,29 @@ app.get('/api/serials', async (req, res) => {
     } catch (e) {
         console.error("Error fetching serials:", e.message);
         res.json([]);
+    }
+});
+
+app.get('/api/serials/order/:orderNumber', async (req, res) => {
+    try {
+        const { orderNumber } = req.params;
+        const result = await req.db.request().input('OrderNumber', sql.NVarChar, orderNumber).query(`
+            SELECT s.*, sh.OperationId as HistOpId, op.Name as HistOpName, sh.OperatorId as HistUserId, u.Name as HistUserName, sh.Timestamp as HistTs 
+            FROM Serials s 
+            LEFT JOIN SerialHistory sh ON s.SerialNumber = sh.SerialNumber 
+            LEFT JOIN Users u ON sh.OperatorId = u.Id 
+            LEFT JOIN Operations op ON sh.OperationId = op.Id 
+            WHERE s.OrderNumber = @OrderNumber
+            ORDER BY s.SerialNumber
+        `);
+        const map = new Map();
+        result.recordset.forEach(r => {
+            if(!map.has(r.SerialNumber)) map.set(r.SerialNumber, { serialNumber: r.SerialNumber, orderNumber: r.OrderNumber, partNumberId: r.PartNumberId, currentOperationId: r.CurrentOperationId, isComplete: r.IsComplete, trayId: r.TrayId, testFechaRegistro: r.TestFechaRegistro, testSensorFW: r.TestSensorFW, history: [], printHistory: [] });
+            if(r.HistOpId) map.get(r.SerialNumber).history.push({ operationId: r.HistOpId, operationName: r.HistOpName, operatorId: r.HistUserId, operatorName: r.HistUserName, timestamp: r.HistTs });
+        });
+        res.json(Array.from(map.values()));
+    } catch (e) {
+        res.status(500).json({ error: e.message });
     }
 });
 
@@ -1149,6 +1430,138 @@ app.delete('/api/serials/:serialNumber', async (req, res) => {
         res.status(500).json({ error: e.message });
     }
 });
+//API TO SAVE TEST LOGS FROM SENSORS (Optimized for Bulk Inserts and Real-Time Emission)
+app.post('/api/sensors/events/bulk', async (req, res) => {
+    let transaction; // Definir fuera para poder hacer rollback en el catch
+    try {
+        const eventos = req.body;
+
+        if (!Array.isArray(eventos) || eventos.length === 0) {
+            return res.status(400).json({ error: "El body debe ser un arreglo de eventos." });
+        }
+
+        transaction = new sql.Transaction(req.db);
+        await transaction.begin();
+
+        // Cargar Golden Serials en memoria para validación rápida
+        const goldenRes = await transaction.request().query('SELECT SerialNumber, Type FROM GoldenSerials');
+        const goldenMap = new Map();
+        goldenRes.recordset.forEach(r => goldenMap.set(r.SerialNumber, r.Type));
+
+        for (let e of eventos) {
+            const {
+                fecha_registro,
+                HUB,
+                HUB_FW,
+                datos
+            } = e;
+
+            if (!datos) continue;
+
+            let sensorName = datos.name;
+            let skipInsert = false;
+
+            const isHubGolden = goldenMap.get(HUB) === 'HUB';
+            const isM3Golden = goldenMap.get(datos.name) === 'M3';
+
+            // Lógica Golden M3 (Solo si el HUB NO es Golden, ya que HUB Golden tiene prioridad de "guardar todo")
+            if (!isHubGolden && isM3Golden) {
+                // Verificar si el HUB ya existe
+                const checkHub = await transaction.request().input('H', sql.NVarChar, HUB).query('SELECT TOP 1 isRW FROM test_logs WHERE HUB = @H');
+                
+                if (checkHub.recordset.length > 0) {
+                    const existingIsRW = checkHub.recordset[0].isRW;
+                    const isReworkedDate = (fecha_registro >= Date.now());
+                    console.log(isReworkedDate);
+                    if (!existingIsRW && !isReworkedDate) { // isRW == 0
+                        // Solo actualizar fecha, omitir insert
+                        await transaction.request()
+                            .input('F', sql.DateTime, new Date(fecha_registro))
+                            .input('H', sql.NVarChar, HUB)
+                            .query('UPDATE test_logs SET FechaRegistro = @F WHERE HUB = @H');
+                        skipInsert = true;
+                    } else {
+                        // isRW == 1, insertar pero con nombre 'golden'
+                        sensorName = 'golden';
+                    }
+                } else {
+                    // No existe HUB, insertar con nombre 'golden'
+                    sensorName = 'golden';
+                }
+            }
+
+            if (skipInsert) continue;
+           
+            // SOLUCIÓN: Crear un nuevo request para cada iteración dentro de la transacción
+            const request = transaction.request();
+
+            request.input("Fecha", sql.DateTime, new Date(fecha_registro));
+            if (isHubGolden) {
+                request.input("Hub", sql.NVarChar, 'golden');
+            } else {
+                request.input("Hub", sql.NVarChar, HUB);
+            }
+            request.input("HubFW", sql.NVarChar, HUB_FW);
+            request.input("Name", sql.NVarChar, sensorName);
+            request.input("FW", sql.NVarChar, datos.fw_version);
+            request.input("Type", sql.NVarChar, datos.type);
+            request.input("Status", sql.NVarChar, datos.status);
+            request.input("Temp", sql.NVarChar, datos.temperature);
+            request.input("Hum", sql.NVarChar, datos.humidity);
+            request.input("Scalar", sql.NVarChar, datos.scalar);
+            request.input("Standby", sql.NVarChar, datos.sensor_standby);
+            request.input("isRW", sql.Bit, datos.isRW ?? datos.isRw ?? 0);
+        
+            await request.query(`
+                INSERT INTO test_logs
+                (FechaRegistro, HUB, HUB_FW, SensorName, SensorFW, SensorType, Status, Temperature, Humidity, ScalarValue, SensorStandby, isRW)
+                VALUES (@Fecha, @Hub, @HubFW, @Name, @FW, @Type, @Status, @Temp, @Hum, @Scalar, @Standby, @isRW);
+            `);
+            
+            if (global.io) {
+                global.io.emit('sensor_event', {
+                    fecha_registro,
+                    HUB,
+                    HUB_FW,
+                    datos
+                });
+            }
+        }
+
+        await transaction.commit();
+        res.json({ success: true, message: "Eventos guardados correctamente.", count: eventos.length });
+        
+
+    } catch (err) {
+        console.error("Error guardando eventos:", err);
+        // Si hay error y la transacción está activa, revertir cambios
+        if (transaction) {
+            await transaction.rollback().catch(e => console.error("Error en rollback:", e));
+        }
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// GOLDEN SERIALS MANAGEMENT
+app.get('/api/golden-serials', async (req, res) => {
+    try {
+        const result = await req.db.request().query('SELECT * FROM GoldenSerials');
+        res.json(result.recordset);
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.post('/api/golden-serials', async (req, res) => {
+    const { serialNumber, type } = req.body;
+    try {
+        await req.db.request().input('SN', sql.NVarChar, serialNumber).input('Type', sql.NVarChar, type).query('INSERT INTO GoldenSerials (SerialNumber, Type) VALUES (@SN, @Type)');
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.delete('/api/golden-serials/:serial', async (req, res) => {
+    try {
+        await req.db.request().input('SN', sql.NVarChar, req.params.serial).query('DELETE FROM GoldenSerials WHERE SerialNumber = @SN');
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
 
 // BATCH UPDATE DE CHAROLA (actualiza todos los seriales de una charola a una operación y estado)
 app.post('/api/serials/batch-update', async (req, res) => {
@@ -1185,12 +1598,58 @@ app.post('/api/serials/batch-update', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Marcar serial como procesado (solo LOT_BASED)
+app.post('/api/serials/:serialNumber/process', async (req, res) => {
+  const { serialNumber } = req.params;
+  // Verifica tipo LOT_BASED
+  const serialRes = await req.db.request().input('SerialNumber', sql.NVarChar, serialNumber)
+    .query('SELECT s.*, p.SerialGenType FROM Serials s INNER JOIN PartNumbers p ON s.PartNumberId = p.Id WHERE s.SerialNumber = @SerialNumber');
+  if (!serialRes.recordset.length || serialRes.recordset[0].SerialGenType !== 'LOT_BASED') {
+    return res.status(400).json({ error: 'Solo se puede procesar LOT_BASED' });
+  }
+  await req.db.request()
+    .input('SerialNumber', sql.NVarChar, serialNumber)
+    .query('UPDATE Serials SET IsProcessed = 1 WHERE SerialNumber = @SerialNumber');
+  res.json({ success: true });
+});
+
+// Desmarcar serial (solo LOT_BASED)
+app.delete('/api/serials/:serialNumber/process', async (req, res) => {
+  const { serialNumber } = req.params;
+  const serialRes = await req.db.request().input('SerialNumber', sql.NVarChar, serialNumber)
+    .query('SELECT s.*, p.SerialGenType FROM Serials s INNER JOIN PartNumbers p ON s.PartNumberId = p.Id WHERE s.SerialNumber = @SerialNumber');
+  if (!serialRes.recordset.length || serialRes.recordset[0].SerialGenType !== 'LOT_BASED') {
+    return res.status(400).json({ error: 'Solo se puede desprocesar LOT_BASED' });
+  }
+  await req.db.request()
+    .input('SerialNumber', sql.NVarChar, serialNumber)
+    .query('UPDATE Serials SET IsProcessed = 0 WHERE SerialNumber = @SerialNumber');
+  res.json({ success: true });
+});
+
 // --- CATCH-ALL FOR REACT SPA ---
 // Cualquier ruta no capturada por la API devolverá index.html
 app.get('/api/test_logs/:serialNumber', async (req, res) => {
     try {
         const serialNumber = req.params.serialNumber;
-        const data = await getTestLogBySerial(req.db, serialNumber);
+        const partNumber = req.query.partNumber;
+
+        let query = '';
+        if (partNumber === '261001' || partNumber === '261002') {
+             query = `SELECT TOP 1 SensorName as serialNumber, FechaRegistro as fechaRegistro, SensorFW as sensorFW 
+                      FROM test_logs 
+                      WHERE SensorName = @Serial 
+                      ORDER BY FechaRegistro DESC`;
+        } else {
+             query = `SELECT TOP 1 HUB as serialNumber, FechaRegistro as fechaRegistro, HUB_FW as sensorFW 
+                      FROM test_logs 
+                      WHERE  SUBSTRING(HUB, PATINDEX('%[^0]%', HUB + ' '), LEN(HUB)) = @Serial 
+                      ORDER BY FechaRegistro DESC`;
+        }
+
+        const result = await req.db.request().input('Serial', sql.NVarChar, serialNumber).query(query);
+        const data = result.recordset[0];
+
         if (!data) {
             // Return 200 with a user-friendly message instead of 404
             return res.json({ success: false, message: 'No test log found for this serial.' });
@@ -1201,6 +1660,59 @@ app.get('/api/test_logs/:serialNumber', async (req, res) => {
     }
 });
 
+
+// Endpoint to get all test logs
+app.get('/api/test-results', async (req, res) => {
+    try {
+        const result = await req.db.request().query('SELECT FechaRegistro, SensorName, Hub, Hub_FW, SensorFW, Status, Temperature, Humidity, ScalarValue, SensorStandby, isRW FROM test_logs ORDER BY FechaRegistro DESC');
+        res.json(result.recordset.map(r => ({
+            fechaRegistro: r.FechaRegistro,
+            sensorName: r.SensorName,
+            hub: r.Hub,
+            hubFW: r.HubFW,
+            sensorFW: r.SensorFW,
+            status: r.Status,
+            temperature: r.Temperature,
+            humidity: r.Humidity,
+            scalarValue: r.ScalarValue,
+            sensorStandby: r.SensorStandby,
+            isRW: r.isRW
+        })));
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/test-results/:sn', async (req, res) => {
+    try {
+        const log = await getTestLogBySerial(req.db, req.params.sn);
+        res.json(log);
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// --- INICIO: ENDPOINT DE PROGRESO DE ORDEN ACCESSORIES ---
+app.get('/api/order-progress/:orderId', async (req, res) => {
+  const { orderId } = req.params;
+  try {
+    // Cambia esto si tu función se llama diferente
+    const units = await db.getSerialUnitsByOrder(orderId); 
+    const processedUnits = units.filter(u => u.isComplete).length;
+    const totalUnits = units.length;
+    const batchSize = 1; // Cambia si tu caja/lote es de otro tamaño
+    const totalBatches = Math.ceil(totalUnits / batchSize);
+    const currentBatch = Math.floor(processedUnits / batchSize);
+    const waitingForContinue = processedUnits % batchSize === 0 && processedUnits < totalUnits;
+
+    res.json({
+      currentBatch,
+      totalBatches,
+      waitingForContinue,
+      processedUnits
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Error al obtener progreso de la orden.' });
+  }
+});
+// --- FIN: ENDPOINT DE PROGRESO DE ORDEN ACCESSORIES ---
+
 app.get('*', (req, res) => {
     if (req.path.startsWith('/api')) {
         return res.status(404).json({ error: 'API endpoint not found' });
@@ -1209,5 +1721,5 @@ app.get('*', (req, res) => {
 });
 
 app.listen(PORT, () => {
-    console.log(`MES Backend running on http://localhost:${PORT}`);
+    console.log(`MES Backend running on port ${PORT} (DB: ${sqlConfig.database})`);
 });

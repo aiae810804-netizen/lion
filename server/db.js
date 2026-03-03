@@ -5,18 +5,38 @@ import sql from 'mssql';
 const sqlConfig = {
   user: process.env.DB_USER || 'lionuser',
   password: process.env.DB_PASSWORD || 'lionu5er',
-  database: 'testdb',
-  server: process.env.DB_SERVER || 'mx31w1002',
+  database: process.env.DB_NAME || 'liondb', // Cambia a 'liondb' para producción
+  server: process.env.DB_SERVER || 'localhost\\SQLEXPRESS', // Cambia a tu servidor local
   pool: {
-    max: 10,
+    max: 50,
     min: 0,
-    idleTimeoutMillis: 30000
+    idleTimeoutMillis: 300000
   },
   options: {
     encrypt: false, // Para Azure usa true, para local false
-    trustServerCertificate: true // Cambiar a false para producción real
+    trustServerCertificate: true, // Cambiar a true para desarrollo local con SQL Express
   }
 };
+/*const sqlConfig = {
+  user: 'lionuser',
+  password: 'Lionu5er',
+  database: 'liondb',
+  server: 'mx31dblion.database.windows.net',
+  port: 1433,
+  pool: { 
+    max: 10, 
+    min: 0, 
+    idleTimeoutMillis: 30000 
+  },
+  options: { 
+    encrypt: true, 
+    trustServerCertificate: true, 
+    enableArithAbort: true,
+    connectTimeout: 30000,
+    requestTimeout: 30000
+  }
+};*/
+
 
 // Configuración para conectar a 'master' y crear la DB si no existe
 const masterConfig = {
@@ -59,7 +79,7 @@ const SCHEMA_SCRIPTS = [
         StepOrder INT NOT NULL
     );`,
 
-    `IF OBJECT_ID('dbo.PartNumbers', 'U') IS NULL
+     `IF OBJECT_ID('dbo.PartNumbers', 'U') IS NULL
     CREATE TABLE PartNumbers (
         Id NVARCHAR(50) PRIMARY KEY,
         PartNumber NVARCHAR(50) NOT NULL,
@@ -70,6 +90,12 @@ const SCHEMA_SCRIPTS = [
         SerialGenType NVARCHAR(20) DEFAULT 'PCB_SERIAL',
         ProcessRouteId NVARCHAR(50) NULL FOREIGN KEY REFERENCES ProcessRoutes(Id)
     );`,
+    /* Migraciones para campos nuevos si la tabla ya existe */
+    `IF COL_LENGTH('dbo.PartNumbers', 'StdBoxQty') IS NULL 
+     ALTER TABLE dbo.PartNumbers ADD StdBoxQty INT DEFAULT 1;`,
+    `IF COL_LENGTH('dbo.PartNumbers', 'Picture') IS NULL 
+     ALTER TABLE dbo.PartNumbers ADD Picture NVARCHAR(MAX);`,
+    
 
     `IF OBJECT_ID('dbo.WorkOrders', 'U') IS NULL
     CREATE TABLE WorkOrders (
@@ -148,7 +174,14 @@ const SCHEMA_SCRIPTS = [
     Humidity NVARCHAR(50),
     ScalarValue NVARCHAR(50),
     SensorStandby NVARCHAR(20),
-    CreatedAt DATETIME DEFAULT GETDATE()
+    CreatedAt DATETIME DEFAULT GETDATE(),
+    isRW bit NOT NULL DEFAULT 0
+    );`,
+
+    `IF OBJECT_ID('dbo.GoldenSerials', 'U') IS NULL
+    CREATE TABLE GoldenSerials (
+        SerialNumber NVARCHAR(50) PRIMARY KEY,
+        Type NVARCHAR(10) CHECK (Type IN ('M3', 'HUB'))
     );`
 ];
 
@@ -173,22 +206,48 @@ const SEED_QUERIES = [
      ('pn_2', '261004', 'C', 'Hub POE, Gen 3', 'Hub POE', '31########');`
 ];
 
-export { sql, sqlConfig, masterConfig, SCHEMA_SCRIPTS, SEED_QUERIES };
+const pool = new sql.ConnectionPool(sqlConfig);
+const poolConnect = pool.connect();
+pool.on('error', err => console.error('SQL Pool Error', err));
+
+export { sql, sqlConfig, masterConfig, SCHEMA_SCRIPTS, SEED_QUERIES, pool };
 
 export async function getTestLogBySerial(db, serialNumber) {
     // Busca el registro más reciente para ese serial (SensorName)
     const result = await db.request()
         .input('SensorName', sql.NVarChar, serialNumber)
         .query(`
-            SELECT TOP 1 FechaRegistro, SensorFW 
-            FROM test_logs 
-            WHERE SensorName = @SensorName 
+            SELECT TOP 1 FechaRegistro, SensorFW
+            FROM test_logs
+            WHERE SensorName = @SensorName
             ORDER BY FechaRegistro DESC
         `);
     if (result.recordset.length === 0) return null;
     return {
         serialNumber,
         fechaRegistro: result.recordset[0].FechaRegistro,
-        sensorFW: result.recordset[0].SensorFW
+        sensorFW: result.recordset[0].SensorFW,
     };
 }
+
+// Obtiene los seriales de una orden, para progreso ACCESSORIES
+export async function getSerialUnitsByOrder(orderNumber) {
+    await poolConnect;
+    const result = await pool.request()
+        .input('OrderNumber', sql.NVarChar, orderNumber)
+        .query('SELECT SerialNumber, IsComplete FROM Serials WHERE OrderNumber = @OrderNumber');
+    return result.recordset.map(r => ({ serialNumber: r.SerialNumber, isComplete: r.IsComplete }));
+}
+
+// Utilidad para consultas simples tipo: await db.query('SELECT ...', {param:value})
+async function query(sqlString, params = {}) {
+    await poolConnect;
+    const request = pool.request();
+    for (const key in params) {
+        request.input(key, params[key]);
+    }
+    return await request.query(sqlString);
+}
+
+const db = { query };
+export default db;

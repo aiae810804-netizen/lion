@@ -2,8 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Operation, ProcessRoute, WorkOrder, PartNumber, SerialUnit } from '../../../types';
 import SetupSection from './SetupSection';
 import TrayView from './TrayView';
-// import Sidebar from './Sidebar';
-// import ReprintModal from './ReprintModal';
+import { useAlert } from '../../context/AlertContext';
 
 interface StationProps {
   operation: Operation;
@@ -13,6 +12,7 @@ interface StationProps {
 }
 
 export default function StationInterface({ operation, route, onBack, user }: StationProps) {
+  const { showAlert } = useAlert();
   // Estados principales (ejemplo, puedes expandir según la lógica original)
   const [sapOrderInput, setSapOrderInput] = useState('');
   const [qtyInput, setQtyInput] = useState('');
@@ -20,6 +20,7 @@ export default function StationInterface({ operation, route, onBack, user }: Sta
   const [setupStep, setSetupStep] = useState<1 | 2 | 3>(1);
   const [traySerials, setTraySerials] = useState<SerialUnit[]>([]);
   const [trayInput, setTrayInput] = useState('');
+  const [processedSerials, setProcessedSerials] = useState<string[]>([]);
   const qtyRef = useRef<HTMLInputElement>(null);
   const modelRef = useRef<HTMLInputElement>(null);
 
@@ -29,6 +30,37 @@ export default function StationInterface({ operation, route, onBack, user }: Sta
     // Por ahora, solo simula agregar un serial
     setTraySerials([...traySerials, { serialNumber: trayInput } as SerialUnit]);
     setTrayInput('');
+  };
+
+  // Función para marcar charola como PASS y actualizar progreso (LOT_BASED y PCB_SERIAL)
+  const handleFinishTray = async (trayId: string, operationId: string, operatorId: string) => {
+    try {
+      await fetch('/api/serials/batch-update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ trayId, operationId, operatorId, isComplete: true })
+      });
+      // Refresca seriales y progreso
+      // Aquí deberías recargar los seriales de la charola y el progreso de la orden
+      // Ejemplo:
+      // setTraySerials(await db.getSerialsByTray(trayId));
+      // setOrderProgress(await db.getOrderProgress(orderNumber));
+    } catch (err) {
+      // Manejo de error
+      console.error('Error al finalizar charola:', err);
+    }
+  };
+
+  const handlePrintNameplate = async (serialNumber: string) => {
+    if (processedSerials.length === 0) {
+      showAlert("No hay piezas procesadas para empaque", "error", 3000);
+      return;
+    }
+    await fetch('/api/print-label/multi', {
+      method: 'POST',
+      body: JSON.stringify({ serials: [{ serialNumber }], /* otros datos necesarios */ }),
+      headers: { 'Content-Type': 'application/json' }
+    });
   };
 
   // Aquí iría la lógica de efectos, handlers y renderizado de subcomponentes
@@ -59,7 +91,21 @@ export default function StationInterface({ operation, route, onBack, user }: Sta
         trayInput={trayInput}
         setTrayInput={setTrayInput}
         onScanTray={handleScanTray}
+        part={activeOrderPart}
       />
+      {/* Renderizado de seriales en estación final */}
+      {traySerials.map(serial => (
+        <div key={serial.serialNumber}>
+          {activeOrderPart?.serialGenType === 'LOT_BASED' && operation.isFinal && processedSerials.includes(serial.serialNumber) && (
+            <button
+              className="serial-blue-btn"
+              onClick={() => handlePrintNameplate(serial.serialNumber)}
+            >
+              {serial.serialNumber}
+            </button>
+          )}
+        </div>
+      ))}
       {/* Aquí puedes agregar el resto de subcomponentes y lógica según el flujo original */}
       {/* <Sidebar ... /> */}
       {/* <ReprintModal ... /> */}
