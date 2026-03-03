@@ -1132,25 +1132,24 @@ function StationInterface({ operation, route, onBack, user }: StationProps) {
       }
   };
 
-  // --- NUEVO: función para descargar CSV de una charola ---
-  const handleDownloadTrayCsv = (trayId: string) => {
-    const units = groups[trayId];
-    if (!units || units.length === 0) return;
-    const partNumber = units[0].partNumberId || '';
-    // Buscar el productCode correcto usando availableParts
-    const part = availableParts.find(p => p.id === partNumber);
-    const productCode = part?.productCode || '';
-    const orderNumber = units[0].orderNumber || '';
-    const filename = `${orderNumber}_CHAROLA_${trayId}_${orderNumber}.csv`;
-    const csvContent = "PN,SKU,SERIAL\n" + units.map(s => `${partNumber},${productCode},${s.serialNumber}`).join("\n");
-    const blob = new Blob([csvContent], { type: 'text/csv' });
-    const url = window.URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    a.click();
-    window.URL.revokeObjectURL(url);
-};
+    // --- NUEVO: función para descargar CSV de una charola ---
+    const handleDownloadTrayCsv = (trayId: string) => {
+        const units = allOrderSerials.filter(u => u.trayId === trayId);
+        if (!units || units.length === 0) return;
+        const partNumber = units[0].partNumberId || '';
+        const part = availableParts.find(p => p.id === partNumber);
+        const productCode = part?.productCode || '';
+        const orderNumber = units[0].orderNumber || '';
+        const filename = `${orderNumber}_CHAROLA_${trayId}_${orderNumber}.csv`;
+        const csvContent = "PN,SKU,SERIAL\n" + units.map(s => `${partNumber},${productCode},${s.serialNumber}`).join("\n");
+        const blob = new Blob([csvContent], { type: 'text/csv' });
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        a.click();
+        window.URL.revokeObjectURL(url);
+    };
 
   const isOrderComplete = activeOrder && scannedCount >= activeOrder.quantity;
   const isLotBased = activeOrderPart?.serialGenType === 'LOT_BASED';
@@ -1517,7 +1516,7 @@ function StationInterface({ operation, route, onBack, user }: StationProps) {
                         </div>
                         <div className="overflow-y-auto p-4 space-y-3 flex-1">
                             {isLotBased ? (
-                                <TrayProgressSummary serials={allOrderSerials} allOps={allOps} availableParts={availableParts} />
+                                <TrayProgressSummary serials={allOrderSerials} allOps={allOps} availableParts={availableParts} onDownloadCsv={handleDownloadTrayCsv} />
                             ) : (
                                 <SerialProgressList serials={allOrderSerials} stdBoxQty={stdBoxQty} currentOpId={operation.id} />
                             )}
@@ -1604,7 +1603,7 @@ function StationInterface({ operation, route, onBack, user }: StationProps) {
   );
 }
 
-function TrayProgressSummary({ serials, allOps, availableParts }: { serials: SerialUnit[], allOps: Operation[], availableParts: PartNumber[] }) {
+function TrayProgressSummary({ serials, allOps, availableParts, onDownloadCsv }: { serials: SerialUnit[], allOps: Operation[], availableParts: PartNumber[], onDownloadCsv?: (trayId: string) => void }) {
     const groups: Record<string, SerialUnit[]> = {};
     serials.forEach(s => {
         if(s.trayId) {
@@ -1638,7 +1637,7 @@ function TrayProgressSummary({ serials, allOps, availableParts }: { serials: Ser
                                 <button
                                     type="button"
                                     title="Descargar CSV de esta charola"
-                                    onClick={() => handleDownloadTrayCsv(tid)}
+                                    onClick={() => onDownloadCsv?.(tid)}
                                     className="ml-1 p-1 rounded hover:bg-blue-100 text-blue-600 border border-blue-100"
                                 >
                                     <FileDown size={16} />

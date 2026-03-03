@@ -2,20 +2,40 @@ import sql from 'mssql';
 
 // CONFIGURACIÓN DE CONEXIÓN
 // Ajusta estos valores a tu instancia local de SQL Server
+const rawServer = process.env.DB_SERVER || '192.168.0.19\\SQLEXPRESS';
+let resolvedServer = rawServer;
+let resolvedPort = undefined;
+let resolvedInstance = undefined;
+
+// Soporta formatos: host\\INSTANCE, host:port, o solo host
+if (rawServer.includes('\\')) {
+    const parts = rawServer.split('\\');
+    resolvedServer = parts[0];
+    resolvedInstance = parts[1];
+} else if (rawServer.includes(':')) {
+    const parts = rawServer.split(':');
+    resolvedServer = parts[0];
+    resolvedPort = Number(parts[1]);
+}
+
 const sqlConfig = {
-  user: process.env.DB_USER || 'lionuser',
-  password: process.env.DB_PASSWORD || 'lionu5er',
-  database: process.env.DB_NAME || 'liondb', // Cambia a 'liondb' para producción
-  server: process.env.DB_SERVER || 'localhost\\SQLEXPRESS', // Cambia a tu servidor local
-  pool: {
-    max: 50,
-    min: 0,
-    idleTimeoutMillis: 300000
-  },
-  options: {
-    encrypt: false, // Para Azure usa true, para local false
-    trustServerCertificate: true, // Cambiar a true para desarrollo local con SQL Express
-  }
+    user: process.env.DB_USER || 'lionuser',
+    password: process.env.DB_PASSWORD || 'lionu5er',
+    database: process.env.DB_NAME || 'liondb', // Cambia a 'liondb' para producción
+    server: resolvedServer,
+    port: resolvedPort,
+    pool: {
+        max: 50,
+        min: 0,
+        idleTimeoutMillis: 300000
+    },
+    options: {
+        encrypt: false, // Para Azure usa true, para local false
+        trustServerCertificate: true, // Cambiar a true para desarrollo local con SQL Express
+        instanceName: resolvedInstance,
+        connectTimeout: Number(process.env.DB_CONNECT_TIMEOUT) || 30000,
+        requestTimeout: Number(process.env.DB_REQUEST_TIMEOUT) || 30000
+    }
 };
 /*const sqlConfig = {
   user: 'lionuser',

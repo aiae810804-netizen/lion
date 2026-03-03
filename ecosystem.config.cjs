@@ -8,7 +8,7 @@ PORT: 3000,
 // Puedes poner las credenciales aquí o leerlas del .env
 DB_USER:"lionuser",
 DB_PASSWORD:"lionu5er",
-DB_SERVER:"localhost\\SQLEXPRESS",
+DB_SERVER:"192.168.0.19\\SQLEXPRESS",
 DB_NAME:"liondb"
 
 }

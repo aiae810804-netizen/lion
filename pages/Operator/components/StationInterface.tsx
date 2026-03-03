@@ -2,16 +2,17 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Operation, ProcessRoute, WorkOrder, PartNumber, SerialUnit } from '../../../types';
 import SetupSection from './SetupSection';
 import TrayView from './TrayView';
-import { useAlert } from '../../context/AlertContext';
+import { useAlert } from '../../../context/AlertContext';
 
 interface StationProps {
   operation: Operation;
   route: ProcessRoute;
   onBack: () => void;
   user: { id: string; name: string };
+  activeOrderPart?: PartNumber | null;
 }
 
-export default function StationInterface({ operation, route, onBack, user }: StationProps) {
+export default function StationInterface({ operation, route, onBack, user, activeOrderPart }: StationProps) {
   const { showAlert } = useAlert();
   // Estados principales (ejemplo, puedes expandir según la lógica original)
   const [sapOrderInput, setSapOrderInput] = useState('');
@@ -53,7 +54,7 @@ export default function StationInterface({ operation, route, onBack, user }: Sta
 
   const handlePrintNameplate = async (serialNumber: string) => {
     if (processedSerials.length === 0) {
-      showAlert("No hay piezas procesadas para empaque", "error", 3000);
+      showAlert("Aviso", "No hay piezas procesadas para empaque", "error");
       return;
     }
     await fetch('/api/print-label/multi', {
